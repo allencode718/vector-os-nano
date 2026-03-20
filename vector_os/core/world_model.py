@@ -334,6 +334,13 @@ class WorldModel:
 
         if _skill == "pick":
             obj_id: str | None = params.get("object_id")
+            # Also try resolving by label if no object_id
+            if not obj_id:
+                label = params.get("object_label") or params.get("object", "")
+                if label:
+                    matches = self.get_objects_by_label(label)
+                    if matches:
+                        obj_id = matches[0].object_id
             if obj_id and obj_id in self._objects:
                 old = self._objects[obj_id]
                 self._objects[obj_id] = ObjectState(
@@ -346,10 +353,9 @@ class WorldModel:
                     properties=old.properties,
                 )
                 self.update_robot_state(held_object=obj_id, gripper_state="holding")
-            elif obj_id:
-                # Object not in world model yet — still update gripper state
-                self.update_robot_state(held_object=obj_id, gripper_state="holding")
-            # If no object_id in params, skill manages world model directly
+            else:
+                # No matching object — still update gripper state
+                self.update_robot_state(held_object=obj_id or "unknown", gripper_state="holding")
 
         elif _skill == "place":
             obj_id = params.get("object_id") or self._robot.held_object

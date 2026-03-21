@@ -435,11 +435,11 @@ class TestAgentHomeConvenience:
         assert result is True
 
     def test_agent_home_convenience_returns_false_on_failure(self):
-        """agent.home() should return False when execution fails."""
+        """agent.home() should return False when no arm connected."""
         from vector_os.core.agent import Agent
 
-        # Use LLM that will fail — no gripper means HomeSkill may fail
-        agent = Agent(arm=MockArm(), llm=MockLLMFail())
+        # No arm → home skill fails with "No arm connected"
+        agent = Agent(llm=MockLLMFail())
         result = agent.home()
         assert isinstance(result, bool)
         assert result is False

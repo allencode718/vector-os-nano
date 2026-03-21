@@ -99,7 +99,7 @@ class PickSkill:
         },
     }
     preconditions: list[str] = ["gripper_empty"]
-    postconditions: list[str] = ["gripper_holding_any"]
+    postconditions: list[str] = []  # pick ends with gripper open (object dropped)
     effects: dict = {"gripper_state": "holding"}
 
     def execute(self, params: dict, context: SkillContext) -> SkillResult:
@@ -288,9 +288,11 @@ class PickSkill:
         if not context.arm.move_joints(home_joints, duration=_HOME_DURATION):
             return SkillResult(success=False, error_message="Return home after pick failed")
 
-        # NOTE: No release here — pick skill ends with object held.
-        # The executor's postcondition "gripper_holding_any" verifies this.
-        # Release happens in PlaceSkill or when the user commands it.
+        # Step 14: Open gripper to drop object
+        logger.info("[PICK] Dropping object ...")
+        if context.gripper is not None:
+            context.gripper.open()
+            time.sleep(0.3)
 
         logger.info(
             "[PICK] Pick complete! Grasped at (%.1f, %.1f) cm",

@@ -185,21 +185,10 @@ class PickSkill:
         # Step 2: Apply z_offset (gripper height above table)
         base_pos[2] += z_offset
 
-        # Step 3: X offset — uniform +1cm forward for all positions
-        base_pos[0] += x_offset + 0.01
-
-        # Step 4: Gripper asymmetry Y compensation (v2 lines 477-486)
-        # Right jaw opens, left jaw is fixed.
-        # - Left objects (Y>0): overshoot left so fixed jaw clears, right scoops
-        # - Right objects (Y<0): small offset
-        # - Center: constant offset
-        raw_y = base_pos[1] * y_scale
-        if raw_y > 0.02:
-            base_pos[1] = raw_y + 0.03 + raw_y * 0.3
-        elif raw_y < -0.02:
-            base_pos[1] = raw_y + 0.01
-        else:
-            base_pos[1] = raw_y + 0.02
+        # Step 3: X/Y offsets (disabled for tuning — using raw calibrated position)
+        # TODO: re-enable after verifying raw calibration accuracy
+        base_pos[0] += x_offset  # x_offset defaults to 0
+        # No Y compensation — test raw calibration first
 
         logger.info(
             "[PICK] Raw base: (%.1f, %.1f, %.1f) cm, z_offset=%.0fcm, pre_grasp_h=%.0fcm",

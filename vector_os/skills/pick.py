@@ -192,7 +192,7 @@ class PickSkill:
         # Gripper asymmetry Y compensation (right jaw opens, left fixed)
         raw_y = base_pos[1] * y_scale
         if raw_y > 0.02:
-            base_pos[1] = raw_y + 0.03 + raw_y * 0.3  # left: +3cm + 30% proportional
+            base_pos[1] = raw_y + 0.03 + raw_y * 0.5  # left: +3cm + 50% proportional
         elif raw_y < -0.02:
             base_pos[1] = raw_y + 0.01  # right: +1cm
         else:
@@ -370,7 +370,17 @@ class PickSkill:
         Step 3: Density cluster (1.5cm threshold) to find modal position.
         Step 4: camera_to_base() using calibration transform.
         """
-        query = params.get("object_label", "object")
+        # Resolve query label: try object_label, then extract from object_id, then "object"
+        query = params.get("object_label") or params.get("object") or ""
+        if not query:
+            obj_id = params.get("object_id", "")
+            # Extract label from object_id like "battery_0" → "battery"
+            if obj_id and "_" in obj_id:
+                query = obj_id.rsplit("_", 1)[0].replace("_", " ")
+            elif obj_id:
+                query = obj_id
+            else:
+                query = "object"
         logger.info("[PICK] Sampling perception for %r ...", query)
 
         cfg = context.config.get("skills", {}).get("pick", {})

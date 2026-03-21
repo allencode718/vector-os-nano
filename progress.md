@@ -1,58 +1,59 @@
 # Vector OS Nano SDK — Progress
 
-**Last updated:** 2026-03-20 | **Version:** v0.1.0
+**Last updated:** 2026-03-21  
+**Status:** v0.1.0 functional, pick pipeline working, in active tuning
 
-## Status: Feature Complete — In Testing
+## What Works
 
-All 4 development waves done. Full pipeline working end-to-end on hardware.
+- Full NL pipeline: "抓电池" → LLM → scan → detect(VLM) → track(EdgeTAM) → 3D → calibrate → IK → pick → drop
+- Direct commands without LLM: home, scan, open, close (instant, no API call)
+- Chinese + English natural language
+- Live camera viewer: RGB + depth side-by-side, EdgeTAM tracking overlay
+- 696 unit tests passing
+- ROS2 integration layer (optional, 5 nodes + launch file)
+- Textual TUI dashboard
+- PyBullet simulation
+- SO-101 arm driver (Feetech STS3215 serial)
+- Calibration wizard (TUI + readline)
 
-## Key Metrics
+## Current Limitations
 
-| Metric | Value |
-|--------|-------|
-| Tests passing | 696 |
-| Source files | 54+ |
-| Lines of code | 10,000+ |
-| Test coverage | 85% |
-| Tasks complete | 13/13 |
+### Pick Accuracy
+- Empirical XY offsets tuned for specific workspace region
+- Calibration matrix Z-row collapsed (all objects at Z=0.005m)
+- Gripper asymmetry compensation is position-dependent (left/right/center)
+- No look-then-move correction yet (calibration is pose-dependent)
+- URDF model doesn't perfectly match real arm (3D-printed, servo backlash)
 
-## Full Pipeline
+### Perception
+- VLM detection depends on lighting conditions
+- EdgeTAM tracking can lose objects if they move fast or get occluded
+- Camera serial number hardcoded (335122270413)
 
-```
-NL command → LLM → scan → detect (VLM) → track (EdgeTAM) → 3D → calibrate → IK → pick → place
-```
+### LLM
+- Haiku sometimes over-plans (scan→detect even when just told to pick)
+- Conversation context reset after each command (no multi-turn memory)
 
-Background EdgeTAM tracking provides live bounding box overlay independent of pick pipeline.
+### Architecture
+- Calibration only valid at home/scan pose (eye-in-hand, pose-dependent)
+- World model cleared after each pick (conservative but loses history)
+- No grasp success detection (servo current feedback not implemented)
 
-LLM prompt is action-oriented: execute-first, no clarification questions by default.
+## Tuning History
 
-Direct gripper commands (open/close/grip) bypass LLM entirely.
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| z_offset | 10cm | Gripper link to table surface |
+| pre_grasp_height | 6cm | Above grasp target |
+| X offset | +2cm | Uniform forward compensation |
+| Y left | +3cm + 50% proportional | Gripper asymmetry |
+| Y right | +1cm | Gripper asymmetry |
+| Y center | +2cm | Gripper asymmetry |
 
-## Remaining Work
+## Next Steps
 
-1. **Skill Manifest Protocol** — YAML-based alias mapping and LLM context enrichment (ADR-002, in design)
-2. **Pick accuracy tuning** — calibration refinement on real hardware
-3. **More testing** — extended hardware test cycles
-
-## Architecture (Layers)
-
-```
-CLI (readline + optional Textual TUI)
-Agent (planning + direct-mode dispatch)
-Executor + World Model + Skills
-Hardware Abstraction (Arm + Gripper)
---- optional ---
-ROS2 Integration Layer
-PyBullet Simulation Layer
-```
-
-## Modules
-
-- **core**: types, config, protocols
-- **hardware**: SO101Arm, SO101Gripper, SimulatedArm, SimulatedGripper
-- **perception**: RealSenseCamera, VLMDetector, EdgeTAMTracker, pointcloud utils, calibration
-- **llm**: Claude, OpenAI-compatible, Ollama providers
-- **skills**: Pick, Place, Home, Scan, Detect + registry
-- **cli**: readline shell, calibration wizard TUI
-- **ros2**: 5 lifecycle nodes + launch file (optional)
-- **utils**: logging, math helpers
+1. Skill Manifest Protocol (ADR-002) — alias-based command routing
+2. Re-calibration with more points + Z variation
+3. Hand-eye calibration for pose-independent transforms
+4. Grasp success detection via servo current/load
+5. Multi-object pick-and-place sequences

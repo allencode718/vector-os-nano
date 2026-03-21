@@ -40,10 +40,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Gripper height above table (z offset added to the raw calibrated position)
-_DEFAULT_Z_OFFSET: float = 0.04        # 4 cm (tuned — 7cm was still too high for small objects)
+_DEFAULT_Z_OFFSET: float = 0.10        # 10 cm (matches vector_ws — z_offset is gripper_link height)
 
 # Pre-grasp approach height above the target grasp point
-_DEFAULT_PRE_GRASP_HEIGHT: float = 0.06  # 6 cm (PRE_GRASP_HEIGHT in v2)
+_DEFAULT_PRE_GRASP_HEIGHT: float = 0.02  # 2 cm above grasp (v2 comment: "tiny descent minimizes XY drift")
 
 # Maximum pick attempts before reporting failure
 _DEFAULT_MAX_RETRIES: int = 2
@@ -211,8 +211,14 @@ class PickSkill:
             base_pos[1] = raw_y + 0.02
 
         logger.info(
-            "[PICK] Target: (%.1f, %.1f, %.1f) cm",
+            "[PICK] Raw base: (%.1f, %.1f, %.1f) cm, z_offset=%.0fcm, pre_grasp_h=%.0fcm",
+            base_pos_result[0] * 100, base_pos_result[1] * 100, base_pos_result[2] * 100,
+            z_offset * 100, pre_grasp_h * 100,
+        )
+        logger.info(
+            "[PICK] Grasp target: (%.1f, %.1f, %.1f) cm | Pre-grasp: %.1f cm",
             base_pos[0] * 100, base_pos[1] * 100, base_pos[2] * 100,
+            (base_pos[2] + pre_grasp_h) * 100,
         )
 
         # Step 5: Workspace boundary check

@@ -252,26 +252,24 @@ def main() -> None:
 
                     display = color.copy()
 
-                    # Draw bounding boxes from latest detections
-                    if hasattr(perception, '_last_detections') and perception._last_detections:
-                        for det in perception._last_detections:
-                            x1, y1, x2, y2 = [int(v) for v in det.bbox]
-                            cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                            label = f"{det.label} {det.confidence:.0%}"
-                            cv2.putText(display, label, (x1, y1 - 8),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-                    # Draw tracked object masks/bboxes
+                    # Draw tracked objects (live EdgeTAM bounding boxes)
                     if hasattr(perception, '_last_tracked') and perception._last_tracked:
                         for obj in perception._last_tracked:
                             if obj.bbox_2d:
                                 x1, y1, x2, y2 = [int(v) for v in obj.bbox_2d]
-                                cv2.rectangle(display, (x1, y1), (x2, y2), (255, 0, 255), 2)
-                                info = f"T{obj.track_id}: {obj.label}"
+                                cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                                label = obj.label
                                 if obj.pose:
-                                    info += f" ({obj.pose.x:.2f},{obj.pose.y:.2f},{obj.pose.z:.2f})"
-                                cv2.putText(display, info, (x1, y2 + 16),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+                                    label += f" ({obj.pose.x:.2f},{obj.pose.y:.2f},{obj.pose.z:.2f})"
+                                cv2.putText(display, label, (x1, y1 - 8),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    # Fallback: show VLM detections only if no tracking active
+                    elif hasattr(perception, '_last_detections') and perception._last_detections:
+                        for det in perception._last_detections:
+                            x1, y1, x2, y2 = [int(v) for v in det.bbox]
+                            cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            cv2.putText(display, det.label, (x1, y1 - 8),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
                     cv2.imshow("Vector OS - Camera", display)
                     key = cv2.waitKey(33)  # ~30fps

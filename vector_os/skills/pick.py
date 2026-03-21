@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Gripper height above table (z offset added to the raw calibrated position)
-_DEFAULT_Z_OFFSET: float = 0.10        # 10 cm (matches skill.pick.z_offset default in skill_node_v2.py)
+_DEFAULT_Z_OFFSET: float = 0.07        # 7 cm (reduced from 10cm — was descending too high)
 
 # Pre-grasp approach height above the target grasp point
 _DEFAULT_PRE_GRASP_HEIGHT: float = 0.06  # 6 cm (PRE_GRASP_HEIGHT in v2)
@@ -264,10 +264,12 @@ class PickSkill:
         if not context.arm.move_joints(q_grasp, duration=_DESCENT_DURATION):
             return SkillResult(success=False, error_message="Descent to grasp failed")
 
-        # Step 11: Close gripper 3x with 0.2s interval
-        # (STS3215 servos sometimes miss commands — 3x ensures closure)
-        logger.info("[PICK] Closing gripper ...")
+        # Step 11: Open → wait → Close gripper sequence
+        # Open first to ensure full grip range, then close to grasp
+        logger.info("[PICK] Gripper sequence: open → close ...")
         if context.gripper is not None:
+            context.gripper.open()
+            time.sleep(0.3)
             for _ in range(3):
                 context.gripper.close()
                 time.sleep(0.2)

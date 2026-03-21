@@ -342,6 +342,7 @@ class WorldModel:
                     matches = self.get_objects_by_label(label)
                     if matches:
                         obj_id = matches[0].object_id
+            # Pick now ends with drop — gripper is open, nothing held
             if obj_id and obj_id in self._objects:
                 old = self._objects[obj_id]
                 self._objects[obj_id] = ObjectState(
@@ -349,14 +350,11 @@ class WorldModel:
                     label=old.label,
                     x=old.x, y=old.y, z=old.z,
                     confidence=old.confidence,
-                    state="grasped",
+                    state="on_table",
                     last_seen=time.time(),
                     properties=old.properties,
                 )
-                self.update_robot_state(held_object=obj_id, gripper_state="holding")
-            else:
-                # No matching object — still update gripper state
-                self.update_robot_state(held_object=obj_id or "unknown", gripper_state="holding")
+            self.update_robot_state(held_object=None, gripper_state="open")
 
         elif _skill == "place":
             obj_id = params.get("object_id") or self._robot.held_object

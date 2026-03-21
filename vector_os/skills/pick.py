@@ -100,7 +100,7 @@ class PickSkill:
     }
     preconditions: list[str] = ["gripper_empty"]
     postconditions: list[str] = []  # pick ends with gripper open (object dropped)
-    effects: dict = {"gripper_state": "holding"}
+    effects: dict = {"gripper_state": "open"}  # pick ends with drop
 
     def execute(self, params: dict, context: SkillContext) -> SkillResult:
         """Execute pick with retry logic.

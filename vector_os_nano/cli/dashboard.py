@@ -49,7 +49,7 @@ _LOGO_RICH = """\
 [bold #00b4b4]╚██╗ ██╔╝██╔══╝  ██║        ██║   ██║   ██║██╔══██╗[/bold #00b4b4]
 [bold #00b4b4] ╚████╔╝ ███████╗╚██████╗   ██║   ╚██████╔╝██║  ██║[/bold #00b4b4]
 [bold #00b4b4]  ╚═══╝  ╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝[/bold #00b4b4]
-[dim]          O S    N A N O   —   v0.1.0[/dim]"""
+[dim]            O S    N A N O   —   v0.1.0[/dim]"""
 
 # Bar width for joint angle visualization
 _BAR_WIDTH = 16
@@ -68,6 +68,22 @@ _JOINT_RANGES: dict[str, tuple[float, float]] = {
 # ---------------------------------------------------------------------------
 # Logging bridge: routes Python logging → RichLog widget
 # ---------------------------------------------------------------------------
+
+class _SelectableRichLog(RichLog):
+    """RichLog that doesn't capture mouse — allows terminal native copy/paste."""
+
+    def on_mouse_down(self, event: Any) -> None:
+        """Don't capture mouse down — let terminal handle selection."""
+        pass
+
+    def on_mouse_move(self, event: Any) -> None:
+        """Don't capture mouse move — let terminal handle selection."""
+        pass
+
+    def on_mouse_up(self, event: Any) -> None:
+        """Don't capture mouse up — let terminal handle selection."""
+        pass
+
 
 class _RichLogHandler(logging.Handler):
     """Logging handler that writes to a Textual RichLog widget.
@@ -288,7 +304,7 @@ if TEXTUAL_AVAILABLE:
                 # Right panel: chat log + input together
                 with Vertical(id="right-col"):
                     yield Label("CHAT", classes="panel-title")
-                    yield RichLog(id="chat-log", highlight=True, markup=True, wrap=True, auto_scroll=True)
+                    yield _SelectableRichLog(id="chat-log", highlight=True, markup=True, wrap=True, auto_scroll=True)
                     yield Input(
                         placeholder="vector> type command or natural language...",
                         id="command-input",

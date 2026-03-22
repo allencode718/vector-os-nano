@@ -599,15 +599,17 @@ if TEXTUAL_AVAILABLE:
 
         def on_input_submitted(self, event: Input.Submitted) -> None:
             """Handle Enter key in command input."""
-            text = str(event.value).strip()
+            # Grab text before clearing
+            inp = self.query_one("#command-input", Input)
+            text = inp.value.strip()
             if not text:
                 return
 
-            # Prevent event from propagating further
+            # Clear and refocus immediately
+            inp.value = ""
+            inp.action_end()  # move cursor to end (clears selection)
+            event.prevent_default()
             event.stop()
-
-            # Clear input widget
-            event.input.value = ""
 
             # Show user message in chat
             self._log(f"\n[bold #00b4b4]You:[/bold #00b4b4] {text}")
@@ -645,8 +647,9 @@ if TEXTUAL_AVAILABLE:
                     import json as _json
                     self._log(_json.dumps(self._agent.world.to_dict(), indent=2, default=str))
                 return
-            if cmd in ("quit", "exit", "q"):
-                self.exit()
+            if cmd in ("quit", "exit", "q", "bye"):
+                self._log("[dim]Goodbye.[/dim]")
+                self.exit(return_code=0)
                 return
 
             if self._agent is None:

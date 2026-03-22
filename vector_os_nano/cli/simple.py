@@ -204,11 +204,7 @@ class SimpleCLI:
     @staticmethod
     def _quiet_logging() -> None:
         """Suppress verbose logs for clean CLI output."""
-        for name in [
-            "vector_os_nano",
-            "httpx",
-        ]:
-            logging.getLogger(name).setLevel(logging.WARNING)
+        logging.getLogger().setLevel(logging.WARNING)
 
     def _print_banner(self) -> None:
         import pathlib as _pl

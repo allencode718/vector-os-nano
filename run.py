@@ -34,7 +34,7 @@ except ImportError:
 finally:
     sys.stderr = _stderr
 
-logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
+logging.basicConfig(level=logging.WARNING, format="%(name)s: %(message)s")
 logger = logging.getLogger("vector_os")
 
 

@@ -352,10 +352,42 @@ class Agent:
                 )
 
             last_result = result
+
+            # ── Stage 5: ADAPT — inject failure context for re-planning ──
+            failed_skill = result.failed_step.skill_name if result.failed_step else "unknown"
+            self._conversation_history.append({
+                "role": "assistant",
+                "content": (
+                    f"Execution failed at step '{failed_skill}': {result.failure_reason}. "
+                    f"Please adjust the plan or inform the user."
+                ),
+            })
             logger.warning(
                 "[Agent] Attempt %d/%d failed: %s",
                 attempt + 1, max_retries, result.failure_reason,
             )
+
+            # If the object simply doesn't exist, no point retrying same plan
+            reason = result.failure_reason or ""
+            if "Cannot locate" in reason or "not found" in reason.lower():
+                # Ask LLM to explain to the user instead of retrying
+                agent_prompt = self._load_agent_prompt()
+                explain = self._llm.chat(
+                    f"The command '{instruction}' failed because: {reason}. "
+                    f"Explain this to the user briefly and suggest alternatives.",
+                    system_prompt=agent_prompt,
+                    history=self._conversation_history,
+                )
+                return ExecutionResult(
+                    success=False,
+                    status="failed",
+                    steps_completed=result.steps_completed,
+                    steps_total=result.steps_total,
+                    failed_step=result.failed_step,
+                    failure_reason=result.failure_reason,
+                    trace=result.trace,
+                    message=explain,
+                )
 
         # All attempts exhausted
         if last_result is not None:

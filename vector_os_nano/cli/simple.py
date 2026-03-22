@@ -1,7 +1,10 @@
-"""Vector OS Nano — Simple CLI.
+"""Vector OS Nano — Interactive CLI with AI Chat.
 
-readline-based interactive shell that wraps the Agent class.
-No ROS2 — direct Python calls only.
+readline-based interactive shell with:
+- Robot command execution via Agent
+- AI conversation with Claude Haiku (multi-turn memory)
+- Status-aware chat (AI knows robot state + objects)
+- Visual distinction between commands, AI chat, and system messages
 
 Entry point: vector-os  (configured in pyproject.toml)
 """
@@ -11,33 +14,41 @@ import json
 import logging
 import readline  # noqa: F401 — side-effect: enables line editing and history
 import sys
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from vector_os_nano.core.types import ExecutionResult
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 from vector_os_nano.version import __version__ as _VERSION
 
+# ---------------------------------------------------------------------------
+# ANSI color codes
+# ---------------------------------------------------------------------------
+_TEAL = "\033[38;2;0;180;180m"
+_CYAN = "\033[36m"
+_GREEN = "\033[32m"
+_RED = "\033[31m"
+_YELLOW = "\033[33m"
+_DIM = "\033[2m"
+_BOLD = "\033[1m"
+_RESET = "\033[0m"
+
 
 class SimpleCLI:
-    """Interactive command-line interface for Vector OS."""
+    """Interactive CLI with AI chat and robot control."""
 
     COMMANDS: dict[str, str] = {
-        "pick":   "Pick an object: pick <object_name>",
-        "place":  "Place held object: place [x y z]",
+        "pick":   "Pick an object: pick <name>",
+        "place":  "Place held object",
         "home":   "Move arm to home position",
-        "scan":   "Move arm to scan position",
+        "scan":   "Move to scan position",
         "open":   "Open gripper",
         "close":  "Close gripper",
         "detect": "Detect objects: detect [query]",
-        "stop":   "Stop all tasks, return home",
+        "stop":   "Stop all tasks",
         "status": "Show system status",
-        "skills": "List available skills",
-        "world":  "Show world model state",
-        "help":   "Show this help",
-        "quit":   "Exit (also: exit, q, Ctrl-C)",
+        "world":  "Show world model",
+        "help":   "Show commands",
+        "quit":   "Exit (also: q, Ctrl-C)",
     }
 
     def __init__(self, agent: Any = None, verbose: bool = False) -> None:
@@ -56,7 +67,7 @@ class SimpleCLI:
 
         while self._running:
             try:
-                user_input = input("vector> ").strip()
+                user_input = input(f"vector> ").strip()
             except (KeyboardInterrupt, EOFError):
                 print()
                 self._running = False
@@ -69,39 +80,85 @@ class SimpleCLI:
         print("Goodbye.")
 
     def _handle_input(self, text: str) -> None:
-        """Route a line of input to the appropriate handler."""
+        """Route input: built-in CLI commands → Agent unified pipeline."""
         parts = text.split(None, 1)
         command = parts[0].lower()
-        args = parts[1] if len(parts) > 1 else ""
 
+        # Built-in CLI-only commands
         if command in ("quit", "exit", "q"):
             self._running = False
-        elif command == "help":
+            return
+        if command == "help":
             self._print_help()
-        elif command == "status":
+            return
+        if command == "status":
             self._handle_status()
-        elif command == "skills":
+            return
+        if command == "skills":
             self._handle_skills()
-        elif command == "world":
+            return
+        if command == "world":
             self._handle_world()
-        elif self._agent is not None:
-            # All other input goes to the agent
-            result = self._agent.execute(text)
-            self._print_result(result)
+            return
+
+        # Everything else → unified Agent pipeline
+        if self._agent is not None:
+            self._execute_unified(text)
         else:
-            print(f"Unknown command: {command}. Type 'help' for commands.")
+            print(f"{_DIM}No agent configured. Type 'help'.{_RESET}")
+
+    # ------------------------------------------------------------------
+    # Unified execution — all user input goes here
+    # ------------------------------------------------------------------
+
+    def _execute_unified(self, text: str) -> None:
+        """Route all input through Agent's multi-stage pipeline."""
+        start = time.time()
+        result = self._agent.execute(text)
+        elapsed = time.time() - start
+
+        # Display based on result status
+        if result.status == "chat":
+            # Pure chat response from AI
+            if result.message:
+                print(f"\n{_TEAL}V:{_RESET} {result.message}\n")
+
+        elif result.status == "query":
+            # Query response (scan+detect happened, AI summarized)
+            if result.message:
+                print(f"\n{_TEAL}V:{_RESET} {result.message}\n")
+
+        elif result.status == "clarification_needed":
+            msg = result.message or result.clarification_question
+            print(f"\n{_TEAL}V:{_RESET} {msg}\n")
+
+        elif result.success:
+            # Task completed
+            if result.message:
+                print(f"\n{_TEAL}V:{_RESET} {result.message}")
+            print(f"{_GREEN}OK{_RESET} ({result.steps_completed}/{result.steps_total} steps, {elapsed:.1f}s)")
+            if self._verbose and result.trace:
+                for step in result.trace:
+                    icon = f"{_GREEN}OK{_RESET}" if step.status == "success" else f"{_RED}{step.status}{_RESET}"
+                    print(f"  [{icon}] {step.skill_name} ({step.duration_sec:.1f}s)")
+            print()
+
+        else:
+            # Failed
+            if result.message:
+                print(f"\n{_TEAL}V:{_RESET} {result.message}")
+            print(f"{_RED}FAILED: {result.failure_reason}{_RESET}")
+            if self._verbose and result.trace:
+                for step in result.trace:
+                    icon = f"{_GREEN}OK{_RESET}" if step.status == "success" else f"{_RED}{step.status}{_RESET}"
+                    print(f"  [{icon}] {step.skill_name} ({step.duration_sec:.1f}s)")
+            print()
 
     # ------------------------------------------------------------------
     # Display helpers
     # ------------------------------------------------------------------
 
     def _print_banner(self) -> None:
-        TEAL = "\033[38;2;0;180;180m"
-        BOLD = "\033[1m"
-        DIM = "\033[2m"
-        RESET = "\033[0m"
-
-        # Load braille logo from file
         import pathlib as _pl
         _logo_path = _pl.Path(__file__).parent / "logo_braille.txt"
         try:
@@ -111,36 +168,46 @@ class SimpleCLI:
 
         print()
         for line in logo_lines:
-            print(f"{TEAL}{BOLD}{line}{RESET}")
-        print(f"{DIM}{'':>40}v{_VERSION}{RESET}")
+            print(f"{_TEAL}{_BOLD}{line}{_RESET}")
+        print(f"{_DIM}{'':>40}v{_VERSION}{_RESET}")
         print()
-        print(f"  {TEAL}Natural language robot arm control.{RESET}")
-        print(f"  Type {TEAL}'help'{RESET} for commands, or use natural language.\n")
+        print(f"  {_TEAL}Natural language robot arm control + AI chat.{_RESET}")
+        print(f"  Robot commands execute directly. Other messages chat with AI.")
+        print(f"  Type {_TEAL}'help'{_RESET} for commands.\n")
 
     def _print_help(self) -> None:
-        print("\nAvailable commands:")
+        print(f"\n{_BOLD}Robot Commands:{_RESET}")
         for cmd, desc in self.COMMANDS.items():
-            print(f"  {cmd:12s} {desc}")
-        print("\nOr type any natural language instruction (requires LLM).")
-        print()
+            print(f"  {_TEAL}{cmd:12s}{_RESET} {desc}")
+        print(f"\n{_BOLD}AI Chat:{_RESET}")
+        print(f"  Type anything else to chat with the AI assistant.")
+        print(f"  The AI knows your robot state and can help with tasks.")
+        print(f"  Use {_TEAL}'chat <msg>'{_RESET} to force chat mode.\n")
 
     def _handle_status(self) -> None:
         if self._agent is None:
             print("No agent configured.")
             return
-        print(f"Skills: {', '.join(self._agent.skills)}")
-        world = self._agent.world
-        objects = world.get_objects()
-        robot = world.get_robot()
-        print(f"Objects: {len(objects)}")
-        for obj in objects:
-            print(
-                f"  {obj.object_id}: {obj.label} "
-                f"({obj.state}, conf={obj.confidence:.2f})"
-            )
-        print(f"Gripper: {robot.gripper_state}")
-        if robot.held_object:
-            print(f"Holding: {robot.held_object}")
+        print(f"{_BOLD}Skills:{_RESET} {', '.join(self._agent.skills)}")
+        if self._agent._arm is not None:
+            joints = self._agent._arm.get_joint_positions()
+            names = self._agent._arm.joint_names
+            print(f"{_BOLD}Joints:{_RESET}")
+            for n, j in zip(names, joints):
+                print(f"  {n:18s} {j:+.3f} rad")
+        if self._agent._gripper is not None:
+            try:
+                pos = self._agent._gripper.get_position()
+                holding = self._agent._gripper.is_holding()
+                print(f"{_BOLD}Gripper:{_RESET} {'open' if pos > 0.5 else 'closed'}{' (holding)' if holding else ''}")
+            except Exception:
+                pass
+        if hasattr(self._agent._arm, "get_object_positions"):
+            objs = self._agent._arm.get_object_positions()
+            print(f"{_BOLD}Objects:{_RESET} {len(objs)}")
+            for name, pos in objs.items():
+                print(f"  {name:15s} ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
+        print(f"{_BOLD}Chat:{_RESET} {'enabled' if self._llm_client else 'disabled (no API key)'}")
 
     def _handle_skills(self) -> None:
         if self._agent is not None:
@@ -153,22 +220,6 @@ class SimpleCLI:
             print("No agent configured.")
             return
         print(json.dumps(self._agent.world.to_dict(), indent=2))
-
-    def _print_result(self, result: "ExecutionResult") -> None:
-        if result.success:
-            print(f"OK ({result.steps_completed}/{result.steps_total} steps)")
-        elif result.status == "clarification_needed":
-            print(f"Question: {result.clarification_question}")
-        else:
-            print(f"FAILED: {result.failure_reason}")
-
-        if self._verbose and result.trace:
-            for step in result.trace:
-                status_label = "OK" if step.status == "success" else step.status
-                print(
-                    f"  [{status_label}] {step.skill_name} "
-                    f"({step.duration_sec:.1f}s)"
-                )
 
 
 # ---------------------------------------------------------------------------

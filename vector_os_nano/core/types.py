@@ -274,6 +274,7 @@ class TaskPlan:
     steps: list[TaskStep] = field(default_factory=list)
     requires_clarification: bool = False
     clarification_question: str | None = None
+    message: str | None = None  # AI message to user (from planner)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -281,6 +282,7 @@ class TaskPlan:
             "steps": [s.to_dict() for s in self.steps],
             "requires_clarification": self.requires_clarification,
             "clarification_question": self.clarification_question,
+            "message": self.message,
         }
 
     @classmethod
@@ -349,6 +351,7 @@ class ExecutionResult:
     trace: list[StepTrace] = field(default_factory=list)
     world_model_diff: dict[str, Any] = field(default_factory=dict)
     clarification_question: str | None = None
+    message: str | None = None  # AI conversational response to the user
 
     def to_dict(self) -> dict[str, Any]:
         return {

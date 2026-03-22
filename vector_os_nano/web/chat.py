@@ -14,42 +14,49 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_CHAT_SYSTEM_PROMPT = """\
-You are Vector OS Nano's AI assistant. You control a robot arm (SO-101) through natural language.
+def _load_agent_prompt() -> str:
+    """Load agent.md system prompt."""
+    from pathlib import Path
+    for p in [
+        Path("config/agent.md"),
+        Path(__file__).parent.parent.parent / "config" / "agent.md",
+    ]:
+        if p.exists():
+            return p.read_text()
+    return (
+        "You are V, the AI agent for Vector OS Nano. "
+        "You control a SO-101 robot arm. Keep responses concise. "
+        "No markdown. Match the user's language.\n\n"
+        "Mode: {mode}\nArm: {arm_status}\nGripper: {gripper_status}\n"
+        "Objects: {objects_info}"
+    )
 
-Your capabilities:
-- Execute robot commands: pick, place, home, scan, detect, open, close
-- Answer questions about the robot, objects on the table, and system status
-- Chat naturally in Chinese and English
-
-When the user wants the robot to do something, respond with a brief acknowledgment, then the system will execute the command.
-
-When the user asks a question or chats, respond naturally and helpfully.
-
-Keep responses concise (1-3 sentences). Use the same language as the user.
-
-Current robot state:
-{state_info}
-
-Objects on table:
-{objects_info}
-"""
+_AGENT_PROMPT_TEMPLATE = _load_agent_prompt()
 
 # Commands that should be routed to Agent.execute()
 _COMMAND_KEYWORDS = [
-    "pick", "grab", "grasp", "抓", "拿",
-    "place", "put", "放",
-    "home", "回",
-    "scan", "扫",
-    "detect", "find", "look", "检测", "找", "看",
-    "open", "打开", "张",
-    "close", "关", "合",
+    "pick", "grab", "grasp", "抓起", "抓住", "抓取",
+    "place", "put", "放下", "放到",
+    "home",
+    "scan",
+    "detect", "检测",
+    "open", "打开夹", "张开",
+    "close", "关闭夹", "合上",
+    "stop", "停止",
+]
+
+_CHAT_OVERRIDES = [
+    "你能", "你可以", "你会", "什么", "怎么", "如何", "为什么", "哪",
+    "can you", "what", "how", "why", "which", "tell me", "explain",
+    "help me", "is there", "are there", "do you", "could you",
 ]
 
 
 def _is_robot_command(text: str) -> bool:
     """Heuristic: does this message look like a robot command?"""
     lower = text.lower().strip()
+    if any(phrase in lower for phrase in _CHAT_OVERRIDES):
+        return False
     return any(kw in lower for kw in _COMMAND_KEYWORDS)
 
 
@@ -99,9 +106,11 @@ class ChatManager:
         self._history.append({"role": "user", "content": user_message})
         self._trim_history()
 
-        system = _CHAT_SYSTEM_PROMPT.format(
-            state_info=state_info or "Unknown",
-            objects_info=objects_info or "Unknown",
+        system = _AGENT_PROMPT_TEMPLATE.format(
+            mode=state_info or "unknown",
+            arm_status="connected",
+            gripper_status="unknown",
+            objects_info=objects_info or "unknown",
         )
 
         messages = [{"role": "system", "content": system}] + self._history

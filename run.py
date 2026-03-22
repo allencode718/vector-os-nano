@@ -510,10 +510,10 @@ def main() -> None:
             "  python run.py --dashboard  # TUI dashboard\n"
             "  python run.py -d           # TUI dashboard (short flag)\n"
             "  python run.py --cli        # CLI (explicit)\n"
-            "  python run.py --sim        # MuJoCo simulation (no hardware)\n"
-            "  python run.py --web        # Web dashboard (localhost:8000)\n"
-            "  python run.py --web --sim  # Web + MuJoCo simulation\n"
-            "  python run.py --sim -d     # Sim + TUI dashboard\n"
+            "  python run.py --sim              # MuJoCo sim with viewer\n"
+            "  python run.py --sim-headless     # MuJoCo sim without viewer\n"
+            "  python run.py --web --sim        # Web dashboard + sim\n"
+            "  python run.py --sim -d           # Sim + TUI dashboard\n"
         ),
     )
     mode_group = parser.add_mutually_exclusive_group()
@@ -535,17 +535,17 @@ def main() -> None:
     parser.add_argument(
         "--sim",
         action="store_true",
-        help="Use MuJoCo simulation instead of real hardware",
+        help="MuJoCo simulation with viewer (no hardware needed)",
     )
     parser.add_argument(
-        "--sim-gui",
+        "--sim-headless",
         action="store_true",
-        help="Open MuJoCo viewer window (requires --sim)",
+        help="MuJoCo simulation without viewer (headless)",
     )
     args = parser.parse_args()
 
     dashboard_mode: bool = args.dashboard
-    sim_mode: bool = args.sim or args.sim_gui
+    sim_mode: bool = args.sim or args.sim_headless
 
     from vector_os_nano.core.agent import Agent
     from vector_os_nano.core.config import load_config
@@ -553,7 +553,7 @@ def main() -> None:
     cfg = load_config("config/user.yaml")
 
     if sim_mode:
-        arm, gripper, perception, calibration = _init_sim(cfg, gui=args.sim_gui)
+        arm, gripper, perception, calibration = _init_sim(cfg, gui=not args.sim_headless)
     else:
         arm, gripper, perception, calibration = _init_hardware(cfg)
 
@@ -573,7 +573,7 @@ def main() -> None:
     # Status summary
     print()
     if sim_mode:
-        print(f"Mode      : MuJoCo simulation {'(GUI)' if args.sim_gui else '(headless)'}")
+        print(f"Mode      : MuJoCo simulation {'(headless)' if args.sim_headless else '(GUI)'}")
     print(f"Skills    : {', '.join(agent.skills)}")
     llm_label = (
         "configured (" + cfg.get("llm", {}).get("model", "unknown") + ")"

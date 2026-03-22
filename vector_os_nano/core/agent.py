@@ -182,28 +182,24 @@ class Agent:
             logger.debug("Could not sync robot state: %s", exc)
 
     def execute(self, instruction: str) -> ExecutionResult:
-        """Execute a natural language instruction.
+        """Execute a natural language instruction via multi-stage pipeline.
 
-        Without an LLM, only single-word commands are supported (home, scan,
-        pick, place, detect) via ``_execute_direct``.
-
-        With an LLM the flow is:
-            1. Build world state snapshot
-            2. Ask the LLM to decompose the instruction into a TaskPlan
-            3. Execute the plan with the TaskExecutor
-            4. Retry on failure (up to ``agent.max_planning_retries`` times)
-            5. Return the final ExecutionResult
+        Stage 1: CLASSIFY — determine intent (chat/task/direct/query)
+        Stage 2: ROUTE — chat→LLM response, direct→immediate skill, task→plan
+        Stage 3: PLAN — LLM decomposes into skill sequence + user message
+        Stage 4: EXECUTE — run skills step by step
+        Stage 5: ADAPT — on failure, retry with context
+        Stage 6: SUMMARIZE — LLM generates user-friendly result summary
 
         Args:
             instruction: Human-readable command string.
 
         Returns:
-            ExecutionResult describing success/failure with trace.
+            ExecutionResult with trace and AI message.
         """
-        # Sync robot state before planning
         self._sync_robot_state()
 
-        # Try direct commands FIRST (gripper, home, scan — no LLM needed)
+        # ── Stage 1: Try direct commands (no LLM, instant) ──
         direct_result = self._try_direct(instruction)
         if direct_result is not None:
             return direct_result
@@ -211,8 +207,87 @@ class Agent:
         if self._llm is None:
             return self._execute_direct(instruction)
 
-        # Each execute() call starts a fresh one-shot context so that previous
-        # failures do not pollute the planner's reasoning for the new command.
+        # ── Stage 2: CLASSIFY intent ──
+        intent = self._llm.classify(instruction)
+        logger.info("[Agent] Intent: %s for %r", intent, instruction)
+
+        # ── Stage 3: ROUTE by intent ──
+        if intent == "chat":
+            return self._handle_chat(instruction)
+
+        if intent == "direct":
+            # Try as direct, fall through to planning if not matched
+            dr = self._execute_direct(instruction)
+            if dr.success or "Unknown command" not in (dr.failure_reason or ""):
+                return dr
+
+        if intent == "query":
+            # Query = scan + detect + AI summarize
+            return self._handle_query(instruction)
+
+        # intent == "task" (or fallback)
+        return self._handle_task(instruction)
+
+    def _handle_chat(self, instruction: str) -> ExecutionResult:
+        """Handle pure chat — LLM response, no robot action."""
+        agent_prompt = self._load_agent_prompt()
+        response = self._llm.chat(
+            instruction,
+            system_prompt=agent_prompt,
+            history=self._conversation_history,
+        )
+        self._conversation_history.append({"role": "user", "content": instruction})
+        self._conversation_history.append({"role": "assistant", "content": response})
+        if len(self._conversation_history) > 30:
+            self._conversation_history = self._conversation_history[-30:]
+
+        return ExecutionResult(
+            success=True,
+            status="chat",
+            message=response,
+        )
+
+    def _handle_query(self, instruction: str) -> ExecutionResult:
+        """Handle state query — detect objects, then AI describes."""
+        # Execute scan + detect
+        context = self._build_context()
+        scan_skill = self._skill_registry.get("scan")
+        detect_skill = self._skill_registry.get("detect")
+
+        if scan_skill:
+            scan_skill.execute({}, context)
+        if detect_skill:
+            detect_skill.execute({"query": "all objects"}, context)
+
+        # Get updated state
+        self._sync_robot_state()
+        objects_info = ""
+        if hasattr(self._arm, "get_object_positions"):
+            objs = self._arm.get_object_positions()
+            objects_info = ", ".join(
+                f"{name} at ({pos[0]:.2f}, {pos[1]:.2f})"
+                for name, pos in objs.items()
+            )
+
+        # Ask LLM to answer the query with updated info
+        agent_prompt = self._load_agent_prompt()
+        full_prompt = f"{agent_prompt}\n\nDetected objects: {objects_info}"
+        response = self._llm.chat(
+            instruction,
+            system_prompt=full_prompt,
+            history=self._conversation_history,
+        )
+        self._conversation_history.append({"role": "user", "content": instruction})
+        self._conversation_history.append({"role": "assistant", "content": response})
+
+        return ExecutionResult(
+            success=True,
+            status="query",
+            message=response,
+        )
+
+    def _handle_task(self, instruction: str) -> ExecutionResult:
+        """Handle task — plan, execute, summarize."""
         self._conversation_history = [{"role": "user", "content": instruction}]
 
         max_retries: int = (
@@ -220,6 +295,7 @@ class Agent:
         )
 
         last_result: ExecutionResult | None = None
+        plan_message: str | None = None
 
         for attempt in range(max_retries):
             world_state = self._world_model.to_dict()
@@ -230,43 +306,115 @@ class Agent:
                 self._conversation_history,
             )
 
+            if plan.message:
+                plan_message = plan.message
+
             if plan.requires_clarification:
                 return ExecutionResult(
                     success=False,
                     status="clarification_needed",
                     clarification_question=plan.clarification_question,
+                    message=plan.message,
+                )
+
+            if not plan.steps:
+                # LLM returned message but no steps — treat as chat
+                return ExecutionResult(
+                    success=True,
+                    status="chat",
+                    message=plan.message or "I'm not sure what to do.",
                 )
 
             context = self._build_context()
             result = self._executor.execute(plan, self._skill_registry, context)
-
-            # Sync robot state after execution
             self._sync_robot_state()
 
             if result.success:
-                self._conversation_history.append({
-                    "role": "assistant",
-                    "content": f"Executed: {[s.skill_name for s in plan.steps]} — success",
-                })
-                return result
+                # ── Stage 6: SUMMARIZE ──
+                summary = self._summarize(instruction, result)
+                return ExecutionResult(
+                    success=True,
+                    status="completed",
+                    steps_completed=result.steps_completed,
+                    steps_total=result.steps_total,
+                    trace=result.trace,
+                    message=plan_message,
+                    world_model_diff=result.world_model_diff,
+                )
 
             last_result = result
             logger.warning(
                 "[Agent] Attempt %d/%d failed: %s",
-                attempt + 1,
-                max_retries,
-                result.failure_reason,
+                attempt + 1, max_retries, result.failure_reason,
             )
 
         # All attempts exhausted
         if last_result is not None:
-            return last_result
+            return ExecutionResult(
+                success=last_result.success,
+                status=last_result.status,
+                steps_completed=last_result.steps_completed,
+                steps_total=last_result.steps_total,
+                failed_step=last_result.failed_step,
+                failure_reason=last_result.failure_reason,
+                trace=last_result.trace,
+                message=plan_message,
+            )
 
         return ExecutionResult(
             success=False,
             status="failed",
             failure_reason="All planning attempts exhausted",
         )
+
+    def _summarize(self, original_request: str, result: ExecutionResult) -> str:
+        """Generate a user-friendly summary of execution results."""
+        if self._llm is None:
+            return ""
+        trace_str = "\n".join(
+            f"  {s.skill_name}: {s.status} ({s.duration_sec:.1f}s)"
+            for s in result.trace
+        )
+        try:
+            return self._llm.summarize(original_request, trace_str)
+        except Exception:
+            return ""
+
+    def _load_agent_prompt(self) -> str:
+        """Load agent.md and fill with current state."""
+        from pathlib import Path
+        prompt = ""
+        for p in [
+            Path("config/agent.md"),
+            Path(__file__).parent.parent.parent / "config" / "agent.md",
+        ]:
+            if p.exists():
+                prompt = p.read_text()
+                break
+        if not prompt:
+            prompt = "You are V, AI assistant for Vector OS Nano robot arm. {mode} {arm_status} {gripper_status} {objects_info}"
+
+        mode = "MuJoCo simulation" if hasattr(self._arm, "get_object_positions") else "real hardware"
+        arm_status = "connected" if self._arm else "disconnected"
+        gripper_status = "unknown"
+        if self._gripper:
+            try:
+                pos = self._gripper.get_position()
+                gripper_status = "open" if pos > 0.5 else "closed"
+            except Exception:
+                pass
+        objects_info = "unknown"
+        if hasattr(self._arm, "get_object_positions"):
+            objs = self._arm.get_object_positions()
+            objects_info = ", ".join(objs.keys()) if objs else "none"
+
+        try:
+            return prompt.format(
+                mode=mode, arm_status=arm_status,
+                gripper_status=gripper_status, objects_info=objects_info,
+            )
+        except (KeyError, IndexError):
+            return prompt
 
     # -------------------------------------------------------------------------
     # Convenience methods

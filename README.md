@@ -138,8 +138,8 @@ User (natural language, Chinese/English)
 **No robot? No camera? No problem.** Full pick-and-place in simulation:
 
 ```bash
-python run.py --sim-gui    # MuJoCo viewer + CLI
-python run.py --sim         # headless simulation
+python run.py --sim              # MuJoCo viewer + CLI
+python run.py --sim-headless     # headless simulation (no viewer)
 ```
 
 The simulation includes:
@@ -215,8 +215,8 @@ python run.py                  # CLI mode
 python run.py --dashboard      # TUI dashboard
 
 # MuJoCo simulation (no hardware)
-python run.py --sim-gui        # with 3D viewer
-python run.py --sim            # headless
+python run.py --sim              # with 3D viewer
+python run.py --sim-headless     # headless (no viewer)
 
 # Testing
 python run.py --no-arm         # no arm
@@ -325,7 +325,7 @@ agent.execute("抓起红色杯子")
 没有硬件？用 MuJoCo 仿真：
 
 ```bash
-python run.py --sim-gui    # 打开 3D 仿真窗口
+python run.py --sim    # 打开 3D 仿真窗口
 ```
 
 仿真包含 SO-101 真实 STL 模型、6 个可抓取物体（香蕉、杯子、瓶子、螺丝刀、鸭子、乐高积木），支持中文自然语言指令。
@@ -338,7 +338,7 @@ python3 -m venv .venv --prompt vector_os_nano
 source .venv/bin/activate
 pip install -e ".[all]"
 pip install mujoco httpx
-python run.py --sim-gui
+python run.py --sim
 ```
 
 ## 硬件（总计约 $420）

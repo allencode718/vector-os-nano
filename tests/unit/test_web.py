@@ -83,10 +83,10 @@ class TestChatManager:
     def test_is_command_pick(self):
         cm = ChatManager.__new__(ChatManager)
         cm._history = []
-        assert cm.is_command("抓杯子") is True
+        assert cm.is_command("抓起杯子") is True
         assert cm.is_command("pick the mug") is True
         assert cm.is_command("home") is True
-        assert cm.is_command("open") is True
+        assert cm.is_command("detect") is True
 
     def test_is_command_chat(self):
         cm = ChatManager.__new__(ChatManager)
@@ -94,6 +94,7 @@ class TestChatManager:
         assert cm.is_command("hello") is False
         assert cm.is_command("what time is it") is False
         assert cm.is_command("你好") is False
+        assert cm.is_command("你能做什么") is False
 
     def test_history_trim(self):
         cm = ChatManager.__new__(ChatManager)

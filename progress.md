@@ -7,7 +7,7 @@
 
 - Full NL pipeline: "抓杯子" → LLM → scan → detect → pick → place (rotate + drop) → home
 - **Web Dashboard**: `python run.py --web` — localhost:8000, real-time AI chat with Claude Haiku, live robot status, dark glassmorphism theme, WebSocket bidirectional, multi-turn conversation
-- **MuJoCo simulation**: `python run.py --sim-gui` — SO-101 arm with real STL meshes, 6 mesh objects (banana, mug, bottle, screwdriver, duck, lego), weld-based grasping, smooth real-time motion, pick-and-place with rotate-and-drop
+- **MuJoCo simulation**: `python run.py --sim` — SO-101 arm with real STL meshes, 6 mesh objects (banana, mug, bottle, screwdriver, duck, lego), weld-based grasping, smooth real-time motion, pick-and-place with rotate-and-drop
 - **Simulated perception**: ground-truth object detection from MuJoCo state, Chinese/English NL queries
 - Direct commands without LLM: home, scan, open, close (instant, no API call)
 - Chinese + English natural language
@@ -30,7 +30,7 @@ Single entry point with four modes:
 2. **Dashboard Mode**: `python run.py --dashboard` or `-d`
    - Rich TUI with 5 tabs, real-time visualization
 
-3. **Simulation Mode**: `python run.py --sim` or `--sim-gui`
+3. **Simulation Mode**: `python run.py --sim` (viewer) or `--sim-headless`
    - MuJoCo physics with real SO-101 STL meshes
    - 6 mesh objects: banana, mug, bottle, screwdriver, duck, lego
    - Weld-constraint grasping (reliable, no contact/friction issues)

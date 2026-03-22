@@ -74,20 +74,24 @@ def parse_plan_response(goal: str, raw_text: str) -> TaskPlan:
         log.warning("LLM response is not a JSON object: %s", type(data))
         return TaskPlan(goal=goal)
 
+    # Extract message (new: AI's conversational text)
+    ai_message = data.get("message")
+
     # Clarification response
     if data.get("requires_clarification"):
         return TaskPlan(
             goal=goal,
             steps=[],
             requires_clarification=True,
-            clarification_question=data.get("clarification_question"),
+            clarification_question=data.get("clarification_question") or ai_message,
+            message=ai_message,
         )
 
     # Normal plan response
     raw_steps = data.get("steps", [])
     if not isinstance(raw_steps, list):
         log.warning("LLM 'steps' field is not a list: %s", type(raw_steps))
-        return TaskPlan(goal=goal)
+        return TaskPlan(goal=goal, message=ai_message)
 
     steps: list[TaskStep] = []
     for raw in raw_steps:
@@ -100,7 +104,7 @@ def parse_plan_response(goal: str, raw_text: str) -> TaskPlan:
         except (KeyError, TypeError, ValueError) as exc:
             log.warning("Skipping malformed step %s: %s", raw, exc)
 
-    return TaskPlan(goal=goal, steps=steps)
+    return TaskPlan(goal=goal, steps=steps, message=ai_message)
 
 
 # ---------------------------------------------------------------------------
@@ -183,18 +187,53 @@ class ClaudeProvider:
         prompt: str,
         image: Any = None,
     ) -> str:
-        """Send a free-form prompt and return the LLM's text response.
-
-        Image support is reserved for future multimodal use.
-
-        Returns an error description string on network failure — never raises.
-        """
+        """Send a free-form prompt and return the LLM's text response."""
         system_prompt = (
             "You are a helpful assistant for a robot system. "
             "Answer concisely and accurately."
         )
         messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
         return self._chat_completion(system_prompt, messages)
+
+    def classify(self, user_message: str) -> str:
+        """Classify user intent: chat | task | direct | query.
+
+        Returns one of: "chat", "task", "direct", "query".
+        Falls back to "chat" on any error.
+        """
+        from vector_os_nano.llm.prompts import build_classify_prompt
+        system = build_classify_prompt(user_message)
+        messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
+        result = self._chat_completion(system, messages).strip().lower()
+        if result in ("chat", "task", "direct", "query"):
+            return result
+        # Extract first valid word
+        for word in result.split():
+            if word in ("chat", "task", "direct", "query"):
+                return word
+        return "chat"
+
+    def chat(
+        self,
+        user_message: str,
+        system_prompt: str,
+        history: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """Free-form chat with conversation history."""
+        messages: list[dict[str, Any]] = []
+        if history:
+            messages.extend(history[-self.max_history:])
+        messages.append({"role": "user", "content": user_message})
+        return self._chat_completion(system_prompt, messages)
+
+    def summarize(self, original_request: str, execution_trace: str) -> str:
+        """Summarize execution results for the user."""
+        from vector_os_nano.llm.prompts import build_summarize_prompt
+        system = build_summarize_prompt(original_request, execution_trace)
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Summarize the execution results."}
+        ]
+        return self._chat_completion(system, messages)
 
     # ------------------------------------------------------------------
     # Internal helpers

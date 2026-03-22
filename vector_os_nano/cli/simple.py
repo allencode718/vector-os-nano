@@ -101,16 +101,19 @@ class SimpleCLI:
         DIM = "\033[2m"
         RESET = "\033[0m"
 
-        logo = f"""
-{TEAL}{BOLD}██╗   ██╗███████╗ ██████╗████████╗ ██████╗ ██████╗ {RESET}
-{TEAL}{BOLD}██║   ██║██╔════╝██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗{RESET}
-{TEAL}{BOLD}██║   ██║█████╗  ██║        ██║   ██║   ██║██████╔╝{RESET}
-{TEAL}{BOLD}╚██╗ ██╔╝██╔══╝  ██║        ██║   ██║   ██║██╔══██╗{RESET}
-{TEAL}{BOLD} ╚████╔╝ ███████╗╚██████╗   ██║   ╚██████╔╝██║  ██║{RESET}
-{TEAL}{BOLD}  ╚═══╝  ╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝{RESET}
-{DIM}         O S   N A N O  —  v{_VERSION}{RESET}
-"""
-        print(logo)
+        # Load braille logo from file
+        import pathlib as _pl
+        _logo_path = _pl.Path(__file__).parent / "logo_braille.txt"
+        try:
+            logo_lines = _logo_path.read_text().strip().splitlines()
+        except FileNotFoundError:
+            logo_lines = ["VECTOR OS NANO"]
+
+        print()
+        for line in logo_lines:
+            print(f"{TEAL}{BOLD}{line}{RESET}")
+        print(f"{DIM}{'':>40}v{_VERSION}{RESET}")
+        print()
         print(f"  {TEAL}Natural language robot arm control.{RESET}")
         print(f"  Type {TEAL}'help'{RESET} for commands, or use natural language.\n")
 

@@ -42,14 +42,18 @@ from vector_os_nano.version import __version__ as _VERSION
 # ASCII logo — Rich markup, teal color matching Catppuccin Mocha palette
 # ---------------------------------------------------------------------------
 
-_LOGO_RICH = """\
-[bold #00b4b4]██╗   ██╗███████╗ ██████╗████████╗ ██████╗ ██████╗ [/bold #00b4b4]
-[bold #00b4b4]██║   ██║██╔════╝██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗[/bold #00b4b4]
-[bold #00b4b4]██║   ██║█████╗  ██║        ██║   ██║   ██║██████╔╝[/bold #00b4b4]
-[bold #00b4b4]╚██╗ ██╔╝██╔══╝  ██║        ██║   ██║   ██║██╔══██╗[/bold #00b4b4]
-[bold #00b4b4] ╚████╔╝ ███████╗╚██████╗   ██║   ╚██████╔╝██║  ██║[/bold #00b4b4]
-[bold #00b4b4]  ╚═══╝  ╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝[/bold #00b4b4]
-[dim]            O S    N A N O   —   v0.1.0[/dim]"""
+def _load_logo_rich() -> str:
+    """Load braille logo and wrap with Rich markup."""
+    from pathlib import Path
+    logo_path = Path(__file__).parent / "logo_braille.txt"
+    try:
+        lines = logo_path.read_text().strip().splitlines()
+    except FileNotFoundError:
+        lines = ["VECTOR OS NANO"]
+    colored = "\n".join(f"[bold #00b4b4]{l}[/bold #00b4b4]" for l in lines)
+    return colored + "\n[dim]                                        v0.1.0[/dim]"
+
+_LOGO_RICH = _load_logo_rich()
 
 # Bar width for joint angle visualization
 _BAR_WIDTH = 16

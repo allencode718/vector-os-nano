@@ -64,6 +64,8 @@ class SimpleCLI:
     def run(self) -> None:
         """Main readline input loop."""
         self._running = True
+        if not self._verbose:
+            self._quiet_logging()
         self._print_banner()
 
         while self._running:
@@ -123,16 +125,18 @@ class SimpleCLI:
     def _execute_unified(self, text: str) -> None:
         """Route all input through Agent's multi-stage pipeline."""
         start = time.time()
+        step_names: list[str] = []
 
         def _on_message(msg: str) -> None:
-            """Called BEFORE execution starts — show AI's plan message."""
+            """Called BEFORE execution starts — show AI message + plan."""
             print(f"\n  {_TEAL}{_BOLD}V:{_RESET} {msg}")
             print(f"  {_DIM}{'─' * 50}{_RESET}")
 
         def _on_step(skill_name: str, idx: int, total: int) -> None:
-            """Called before each step — show live progress."""
-            bar = f"[{idx+1}/{total}]"
-            print(f"  {_DIM}{bar}{_RESET} {_CYAN}{skill_name}{_RESET}{_DIM}...{_RESET}", end="", flush=True)
+            """Called before each step — show what's about to run."""
+            step_names.append(skill_name)
+            label = skill_name.replace("_", " ")
+            print(f"  {_DIM}[{idx+1}/{total}]{_RESET} {_CYAN}{label}{_RESET}", flush=True)
 
         result = self._agent.execute(text, on_message=_on_message, on_step=_on_step)
         elapsed = time.time() - start
@@ -150,31 +154,56 @@ class SimpleCLI:
             print(f"\n  {_YELLOW}{_BOLD}V:{_RESET} {msg}\n")
 
         elif result.success:
-            # Task completed — trace was shown live, now show summary
-            print()
+            # Show trace summary
+            print(f"  {_DIM}{'─' * 50}{_RESET}")
             if result.trace:
                 for step in result.trace:
-                    if step.status == "success":
-                        print(f" {_GREEN}OK{_RESET} {step.duration_sec:.1f}s")
-                    else:
-                        print(f" {_RED}FAIL{_RESET}")
+                    icon = f"{_GREEN}OK{_RESET}" if step.status == "success" else f"{_RED}FAIL{_RESET}"
+                    print(f"  {icon} {step.skill_name} {_DIM}{step.duration_sec:.1f}s{_RESET}")
             print(f"  {_DIM}{'─' * 50}{_RESET}")
-            print(f"  {_GREEN}{_BOLD}Done{_RESET} {_DIM}{result.steps_completed}/{result.steps_total} steps, {elapsed:.1f}s{_RESET}\n")
+            print(f"  {_GREEN}{_BOLD}Done{_RESET} {_DIM}{result.steps_completed}/{result.steps_total} steps, {elapsed:.1f}s{_RESET}")
+
+            # LLM summarize what was accomplished
+            if hasattr(self._agent, '_llm') and self._agent._llm is not None and result.trace:
+                try:
+                    trace_str = ", ".join(
+                        f"{s.skill_name}({'OK' if s.status=='success' else 'FAIL'})"
+                        for s in result.trace
+                    )
+                    summary = self._agent._llm.summarize(text, trace_str)
+                    if summary and not summary.startswith("LLM error"):
+                        print(f"\n  {_TEAL}{_BOLD}V:{_RESET} {summary}")
+                except Exception:
+                    pass
+            print()
 
         else:
             # Failed
             if result.message:
                 print(f"\n  {_TEAL}{_BOLD}V:{_RESET} {result.message}")
-            print(f"\n  {_RED}{_BOLD}Failed:{_RESET} {result.failure_reason}")
+            print(f"  {_DIM}{'─' * 50}{_RESET}")
+            print(f"  {_RED}{_BOLD}Failed:{_RESET} {result.failure_reason}")
             if result.trace:
                 for step in result.trace:
-                    status = f"{_GREEN}OK{_RESET}" if step.status == "success" else f"{_RED}{step.status}{_RESET}"
-                    print(f"    {status} {step.skill_name} ({step.duration_sec:.1f}s)")
+                    icon = f"{_GREEN}OK{_RESET}" if step.status == "success" else f"{_RED}FAIL{_RESET}"
+                    print(f"  {icon} {step.skill_name} {_DIM}{step.duration_sec:.1f}s{_RESET}")
             print()
 
     # ------------------------------------------------------------------
     # Display helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _quiet_logging() -> None:
+        """Suppress verbose skill/perception logs for clean CLI output."""
+        for name in [
+            "vector_os_nano.skills",
+            "vector_os_nano.hardware.sim",
+            "vector_os_nano.perception",
+            "vector_os_nano.core.executor",
+            "httpx",
+        ]:
+            logging.getLogger(name).setLevel(logging.WARNING)
 
     def _print_banner(self) -> None:
         import pathlib as _pl

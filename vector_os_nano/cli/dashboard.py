@@ -49,7 +49,7 @@ _LOGO_RICH = """\
 [bold #00b4b4]╚██╗ ██╔╝██╔══╝  ██║        ██║   ██║   ██║██╔══██╗[/bold #00b4b4]
 [bold #00b4b4] ╚████╔╝ ███████╗╚██████╗   ██║   ╚██████╔╝██║  ██║[/bold #00b4b4]
 [bold #00b4b4]  ╚═══╝  ╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝[/bold #00b4b4]
-[dim]           O S   N A N O  —  v0.1.0[/dim]"""
+[dim]          O S    N A N O   —   v0.1.0[/dim]"""
 
 # Bar width for joint angle visualization
 _BAR_WIDTH = 16
@@ -288,7 +288,7 @@ if TEXTUAL_AVAILABLE:
                 # Right panel: chat log + input together
                 with Vertical(id="right-col"):
                     yield Label("CHAT", classes="panel-title")
-                    yield RichLog(id="chat-log", highlight=True, markup=True)
+                    yield RichLog(id="chat-log", highlight=True, markup=True, wrap=True, auto_scroll=True)
                     yield Input(
                         placeholder="vector> type command or natural language...",
                         id="command-input",
@@ -304,7 +304,7 @@ if TEXTUAL_AVAILABLE:
             self._setup_logging()
             self.set_interval(1.0, self._refresh_panels)  # 1Hz (was 0.5s, too fast)
             self._log(f"[bold #00b4b4]Vector OS Nano v{_VERSION}[/bold #00b4b4]")
-            self._log("Type commands below. F1=Camera window, Ctrl+E=E-STOP\n")
+            self._log("Type commands below. F1=Camera | Ctrl+E=Stop | Shift+drag=Copy text\n")
             if self._agent is None:
                 self._log("[yellow]No agent configured — running in demo mode[/yellow]")
             # Auto-launch camera window if perception available

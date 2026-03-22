@@ -77,15 +77,32 @@ Single entry point with three modes:
 - Haiku sometimes over-plans (scan→detect even when just told to pick)
 - No multi-turn conversation memory (reset after each command)
 
-## Next Phase: Skill Manifest Protocol (ADR-002)
+## TODO (Next Priorities)
 
-When this version is stable:
-1. YAML skill registry with aliases
-2. LLM context enrichment (available skills → prompt)
-3. Dynamic skill discovery + routing
-4. Multi-agent skill coordination (ROS2)
+### 1. MuJoCo Simulation
+- Replace/supplement PyBullet with MuJoCo for higher fidelity physics
+- MuJoCo has better contact modeling, faster simulation, native Python bindings
+- Goal: full pick pipeline testable in simulation without real hardware
+- Load SO-101 URDF into MuJoCo, implement `SimulatedArm(ArmProtocol)` + `SimulatedCamera`
+- Enable CI/CD testing of the full pick pipeline
 
-See `docs/ADR-002-skill-manifest-protocol.md`.
+### 2. LLM Agent Brain Upgrade
+- **Skill Manifest Protocol (ADR-002)**: YAML skill registry with aliases, auto_steps, rich descriptions
+- **Better task decomposition**: handle complex multi-step instructions ("sort by color", "stack blocks")
+- **Generalization**: handle novel objects, spatial reasoning ("put it next to the blue one")
+- **Multi-turn memory**: conversation context across commands
+- **Model upgrade path**: Sonnet for complex planning, Haiku for simple commands (auto-select)
+- See `docs/ADR-002-skill-manifest-protocol.md`
+
+### 3. Pick Accuracy
+- Re-calibration with more points + Z variation
+- Hand-eye calibration for pose-independent transforms
+- Grasp success detection via servo current/load feedback
+
+### 4. Merge & Release
+- Merge feat/vector-os-nano-python-sdk → main
+- Tag v0.1.0 release
+- PyPI publish
 
 ## Deployment
 

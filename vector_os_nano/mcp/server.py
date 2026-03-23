@@ -175,6 +175,45 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
+def _start_camera_viewer(perception: Any) -> None:
+    """Start a background OpenCV viewer for hardware mode.
+
+    Shows the live RGB feed from the RealSense camera in a daemon thread so
+    the MCP stdio transport is not blocked.  The window closes when the thread
+    exits or the user presses ESC.
+
+    Args:
+        perception: A perception object that exposes ``get_color_frame()``.
+                    If None or the method is absent the function is a no-op.
+    """
+    if perception is None or not hasattr(perception, "get_color_frame"):
+        return
+
+    import threading  # noqa: PLC0415
+    import cv2  # noqa: PLC0415
+
+    def _viewer_loop() -> None:
+        cv2.namedWindow("Vector OS MCP", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Vector OS MCP", 640, 480)
+        while True:
+            try:
+                frame = perception.get_color_frame()
+                if frame is None:
+                    continue
+                # Perception pipeline returns RGB; OpenCV expects BGR.
+                bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                cv2.imshow("Vector OS MCP", bgr)
+                if cv2.waitKey(33) == 27:  # ESC closes the window
+                    break
+            except Exception:
+                break
+        cv2.destroyAllWindows()
+
+    thread = threading.Thread(target=_viewer_loop, daemon=True)
+    thread.start()
+    _log("[MCP] Camera viewer started (ESC to close)")
+
+
 def create_sim_agent(headless: bool = True) -> Agent:
     """Create an Agent with MuJoCo simulation backend.
 
@@ -339,6 +378,9 @@ def create_hardware_agent() -> Agent:
     )
     if calibration is not None:
         agent._calibration = calibration
+
+    # Start live camera feed (hardware mode only, daemon thread).
+    _start_camera_viewer(perception)
 
     _log(f"[MCP] Hardware agent ready. Skills: {agent.skills}")
     _log(f"[MCP] Arm: {'connected' if arm else 'NOT available'}")

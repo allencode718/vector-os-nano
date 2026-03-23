@@ -337,7 +337,26 @@ class TestFormatExecutionResult:
             trace_steps=[("pick", "execution_failed", 0.5)],
         )
         output = _format_execution_result("pick banana", result)
-        assert "pick(failed)" in output
+        assert "pick(failed:" in output or "pick(failed)" in output
+
+    def test_failure_step_includes_error_detail(self) -> None:
+        trace = [
+            StepTrace(step_id="s1", skill_name="scan", status="success", duration_sec=1.0),
+            StepTrace(step_id="s2", skill_name="pick", status="execution_failed",
+                      duration_sec=0.5, error="No valid 3D position samples from perception"),
+        ]
+        result = ExecutionResult(
+            success=False,
+            status="failed",
+            steps_completed=1,
+            steps_total=2,
+            trace=trace,
+            failure_reason="Pick failed — could not determine target position",
+        )
+        output = _format_execution_result("pick battery", result)
+        assert "scan(ok)" in output
+        assert "pick(failed: No valid 3D position samples from perception)" in output
+        assert "Pick failed — could not determine target position" in output
 
     def test_string_passthrough(self) -> None:
         output = _format_execution_result("hello", "The robot is ready.")

@@ -204,8 +204,11 @@ def _format_execution_result(instruction: str, result: Any) -> str:
     if result.trace:
         step_parts: list[str] = []
         for trace in result.trace:
-            ok = "ok" if trace.status == "success" else "failed"
-            step_parts.append(f"{trace.skill_name}({ok})")
+            if trace.status == "success":
+                step_parts.append(f"{trace.skill_name}(ok)")
+            else:
+                detail = trace.error if trace.error else "failed"
+                step_parts.append(f"{trace.skill_name}(failed: {detail})")
         lines.append("Steps: " + " -> ".join(step_parts))
 
         total_duration = sum(t.duration_sec for t in result.trace)

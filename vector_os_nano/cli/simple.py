@@ -153,6 +153,9 @@ class SimpleCLI:
             # Refresh object completer after each command
             self._refresh_completer()
 
+        # Reset scroll region before exit
+        sys.stdout.write("\033[r")
+        sys.stdout.flush()
         _console.print("[dim]Goodbye.[/]")
 
     def _refresh_completer(self) -> None:
@@ -332,24 +335,37 @@ class SimpleCLI:
 
     def _print_banner(self) -> None:
         import pathlib as _pl
+        import shutil
         _logo_path = _pl.Path(__file__).parent / "logo_braille.txt"
         try:
             logo_lines = _logo_path.read_text().strip().splitlines()
         except FileNotFoundError:
             logo_lines = ["VECTOR OS NANO"]
 
-        _console.print()
+        # Clear screen
+        _console.clear()
 
-        # Line-by-line reveal
-        for i, line in enumerate(logo_lines):
+        # Print logo with animation
+        for line in logo_lines:
             _console.print(f"[bold {_TEAL}]{line}[/]")
             time.sleep(0.12)
 
-        _console.print(f"[dim]{'':>40}v{_VERSION}[/]")
+        version_line = f"{'':>40}v{_VERSION}"
+        _console.print(f"[dim]{version_line}[/]")
         time.sleep(0.4)
-        _console.print()
-        _console.print(f"  [{_TEAL}]Natural language robot arm control + AI chat.[/]")
-        _console.print(f"  [dim]Tab = autocomplete  |  Ctrl+R = history  |  'help' = commands[/]")
+
+        subtitle = f"  Natural language robot arm control + AI chat.  Tab | Ctrl+R | 'help'"
+        _console.print(f"[dim]{subtitle}[/]")
+
+        # Set scroll region: pin logo at top, rest scrolls
+        # Logo = len(logo_lines) + version + subtitle = N lines from top
+        header_lines = len(logo_lines) + 2  # logo + version + subtitle
+        term_rows = shutil.get_terminal_size().lines
+        # ANSI: \033[top;bottom r — set scroll region
+        sys.stdout.write(f"\033[{header_lines + 1};{term_rows}r")
+        # Move cursor to scroll region
+        sys.stdout.write(f"\033[{header_lines + 1};1H")
+        sys.stdout.flush()
         _console.print()
 
     def _print_help(self) -> None:

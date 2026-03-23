@@ -12,13 +12,11 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/PyTorch-2.x-red?logo=pytorch&logoColor=white" alt="PyTorch">
-  <img src="https://img.shields.io/badge/MuJoCo-3.6-green?logo=data:image/svg+xml;base64,&logoColor=white" alt="MuJoCo">
+  <img src="https://img.shields.io/badge/MuJoCo-3.6-green" alt="MuJoCo">
+  <img src="https://img.shields.io/badge/Claude_Haiku-LLM_Brain-blueviolet?logo=anthropic&logoColor=white" alt="Claude">
   <img src="https://img.shields.io/badge/ROS2-Optional-blue?logo=ros&logoColor=white" alt="ROS2">
   <img src="https://img.shields.io/badge/Moondream2-VLM-purple" alt="Moondream2">
   <img src="https://img.shields.io/badge/EdgeTAM-Tracking-orange" alt="EdgeTAM">
-  <img src="https://img.shields.io/badge/Claude_Haiku-LLM_Brain-blueviolet?logo=anthropic&logoColor=white" alt="Claude">
-  <img src="https://img.shields.io/badge/Pinocchio-IK_Solver-yellow" alt="Pinocchio">
   <img src="https://img.shields.io/badge/Intel_RealSense-D405-0071C5?logo=intel&logoColor=white" alt="RealSense">
   <img src="https://img.shields.io/badge/LeRobot-SO--ARM100-black" alt="LeRobot">
 </p>
@@ -56,12 +54,10 @@ from vector_os_nano import Agent, SO101
 
 arm = SO101(port="/dev/ttyACM0")
 agent = Agent(arm=arm, llm_api_key="sk-...")
-agent.execute("pick up the red cup")
+agent.execute("pick up the red cup and put it on the left")
 ```
 
-**10 lines of code. From unboxing to natural language control.**
-
-No hardware? No problem:
+No hardware? Full simulation:
 
 ```python
 from vector_os_nano import Agent, MuJoCoArm
@@ -69,92 +65,97 @@ from vector_os_nano import Agent, MuJoCoArm
 arm = MuJoCoArm(gui=True)
 arm.connect()
 agent = Agent(arm=arm, llm_api_key="sk-...")
-agent.execute("pick up the mug")
+agent.execute("把鸭子放到前面")
 ```
 
-## System Architecture
+## SkillFlow — Declarative Skill Routing
 
-```
-User (natural language, Chinese/English)
-  |
-  v
-+---------------------------------------------+
-|              LLM Brain Layer                 |
-|  Claude Haiku (via OpenRouter API)           |
-|  - Intent parsing & task decomposition       |
-|  - Tool calling / function execution         |
-|  - Multi-step planning                       |
-|  - Bilingual: Chinese + English              |
-+---------------------------------------------+
-|              Skill Layer                     |
-|  - pick(object)     detect_all()             |
-|  - home() / scan()  describe_scene()         |
-|  - place(x,y,z)     track(object)            |
-+---------------------------------------------+
-|           Perception Layer                   |
-|  Real hardware:                              |
-|  - Moondream2 VLM (local, ~4GB GPU)         |
-|  - EdgeTAM real-time tracking (20fps)        |
-|  - D405 depth camera (640x480 RGB+D @30fps) |
-|  - Workspace calibration (camera->base)      |
-|  Simulation:                                 |
-|  - MuJoCo ground-truth object positions      |
-|  - Chinese/English NL query matching         |
-+---------------------------------------------+
-|            Control Layer                     |
-|  - Pinocchio FK/IK solver (real hardware)    |
-|  - MuJoCo Jacobian IK solver (simulation)   |
-|  - Joint trajectory interpolation            |
-|  - Gripper command with retry logic          |
-+---------------------------------------------+
-|           Hardware Layer                     |
-|  Real: SO-ARM100 (6-DOF, STS3215 servos)    |
-|        Intel RealSense D405 (USB 3.x)       |
-|  Sim:  MuJoCo 3.6 with real STL meshes      |
-|        6 mesh objects, weld-based grasping   |
-+---------------------------------------------+
+All command routing is **declarative** via the `@skill` decorator. No hard-coded if/else chains. Skills describe themselves, the system routes automatically.
+
+```python
+from vector_os_nano.core.skill import skill, SkillContext
+from vector_os_nano.core.types import SkillResult
+
+@skill(
+    aliases=["grab", "grasp", "抓", "拿", "抓起"],       # trigger words
+    direct=False,                                          # needs planning
+    auto_steps=["scan", "detect", "pick"],                 # default chain
+)
+class PickSkill:
+    name = "pick"
+    description = "Pick up an object from the workspace"
+    parameters = {"object_label": {"type": "string"}}
+    preconditions = ["gripper_empty"]
+    postconditions = ["gripper_holding_any"]
+    effects = {"gripper_state": "holding"}
+
+    def execute(self, params, context):
+        # ... pick implementation ...
+        return SkillResult(success=True)
 ```
 
-## Capabilities
+Routing logic:
 
-| Capability | Status |
-|-----------|--------|
-| Zero-shot natural language grasping | Working |
-| **MuJoCo simulation (no hardware needed)** | **Working** |
-| Real-time object tracking (20fps) | Working |
-| Scene description via VLM | Working |
-| Chinese + English commands | Working |
-| LLM-powered task interpretation | Working |
-| Pick-and-place (grasp + rotate + drop) | Working |
-| Workspace calibration (14-point) | Working |
-| Auto-retry on pick failure | Working |
-| Dynamic gripper compensation | Working |
-| Textual TUI dashboard | Working |
-| ROS2 integration (optional) | Working |
-| 719 unit tests passing | Working |
+```
+"home"           → @skill alias match → direct=True → execute (zero LLM)
+"close grip"     → @skill alias match → direct=True → execute (zero LLM)
+"抓杯子"         → @skill alias match → auto_steps → scan→detect→pick (zero LLM)
+"把鸭子放到左边"  → no simple match → LLM plans pick(hold) + place(left) + home
+"你好"           → no match → LLM classify → chat response
+```
+
+See `docs/skill-protocol.md` for full SkillFlow specification.
+
+## Agent Pipeline
+
+```
+User Input
+    |
+    v
+[1. MATCH]     @skill aliases (zero LLM for simple commands)
+[2. CLASSIFY]  LLM intent: chat / task / query (only when needed)
+[3. PLAN]      LLM decomposes into skill sequence + V speaks
+[4. EXECUTE]   Deterministic step-by-step execution
+[5. ADAPT]     On failure: explain + suggest alternatives
+[6. SUMMARIZE] LLM reports results to user
+```
+
+AI assistant **V** speaks before acting, shows live progress, and summarizes after:
+
+```
+vector> 把所有东西都随便乱放
+
+╭─ V ──────────────────────────────────────────────────╮
+│ 好的主人，我来把所有东西都随便乱放。                     │
+╰──────────────────────────────────────────────────────╯
+  Plan: 13 steps
+
+  [1/13] pick ... OK 14.6s
+  [2/13] place ... OK 11.5s
+  ...
+  [13/13] home ... OK 3.8s
+
+  Done 13/13 steps, 180.0s
+
+╭─ V ──────────────────────────────────────────────────╮
+│ 主人，已把6个物体全部放到不同位置，手臂已回待命。       │
+╰──────────────────────────────────────────────────────╯
+```
 
 ## MuJoCo Simulation
 
-**No robot? No camera? No problem.** Full pick-and-place in simulation:
+**No robot? No camera? No problem.**
 
 ```bash
-python run.py --sim              # MuJoCo viewer + CLI
-python run.py --sim-headless     # headless simulation (no viewer)
+python run.py --sim              # MuJoCo viewer + interactive CLI
+python run.py --sim-headless     # headless (no viewer)
 ```
 
-The simulation includes:
-- **SO-101 arm with real STL meshes** from the CAD model (13 mesh parts)
-- **6 graspable objects**: banana, mug, bottle, screwdriver, duck, lego brick
-- **Weld-constraint grasping** -- reliable, no contact/friction alignment issues
-- **Smooth real-time motion** -- linear interpolation, 60fps viewer sync
-- **Simulated perception** -- ground-truth object detection, Chinese/English NL queries
-- **Full pick-and-place sequence**: open gripper -> approach -> grasp -> lift -> rotate 90deg -> drop -> home
-
-```
-vector> 抓杯子         # Pick up the mug
-vector> 抓香蕉         # Pick up the banana
-vector> grab the duck  # English works too
-```
+- SO-101 arm with real STL meshes (13 parts from CAD)
+- 6 graspable objects: banana, mug, bottle, screwdriver, duck, lego
+- Weld-constraint grasping, smooth real-time motion
+- Pick-and-place with named locations (front, left, right, center, etc.)
+- Simulated perception with Chinese/English NL queries
 
 ## Hardware (~$420 total)
 
@@ -163,7 +164,6 @@ vector> grab the duck  # English works too
 | Robot Arm | LeRobot SO-ARM100 (6-DOF, 3D-printed) | ~$150 |
 | Camera | Intel RealSense D405 | ~$270 |
 | GPU | Any NVIDIA with 8+ GB VRAM | (existing) |
-| Computer | Ubuntu 22.04 / Windows / macOS | (existing) |
 
 <p align="center">
   <img src="images/setup.png" width="600" alt="Hardware Setup">
@@ -171,82 +171,48 @@ vector> grab the duck  # English works too
 
 ## Quick Start
 
-### 1. Create virtual environment
-
 ```bash
+# Setup
 cd vector_os_nano
 python3 -m venv .venv --prompt vector_os_nano
 source .venv/bin/activate
-pip install --upgrade pip
-```
-
-### 2. Install SDK
-
-```bash
-# Core only (no GPU)
-pip install -e "."
-
-# Full (GPU perception + IK + TUI + simulation)
 pip install -e ".[all]"
 
-# MuJoCo simulation only (no GPU required)
-pip install -e "." && pip install mujoco httpx
+# Launch (simulation — no hardware needed)
+python run.py --sim
 
-# GPU: RTX 5080/Blackwell requires nightly PyTorch
-pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
+# Launch (real hardware)
+python run.py
 ```
 
-### 3. Configure LLM
-
-Create `config/user.yaml` (do NOT commit this file):
+LLM config — create `config/user.yaml`:
 ```yaml
 llm:
   api_key: "your-openrouter-api-key"
   model: "anthropic/claude-haiku-4-5"
   api_base: "https://openrouter.ai/api/v1"
 ```
-Get your key at: https://openrouter.ai/keys
 
-### 4. Launch
+## All Launch Modes
 
 ```bash
-# Real hardware
-python run.py                  # CLI mode
-python run.py --dashboard      # TUI dashboard
-
-# MuJoCo simulation (no hardware)
-python run.py --sim              # with 3D viewer
-python run.py --sim-headless     # headless (no viewer)
-
-# Testing
-python run.py --no-arm         # no arm
-python run.py --no-perception  # no camera
-```
-
-Commands (CLI):
-```
-vector> pick battery              # English
-vector> 抓电池                     # Chinese
-vector> grab the red cup          # Natural language
-vector> home                      # Return to home (instant, no LLM)
-vector> open / close              # Gripper control (instant)
-vector> scan                      # Move to scan position
-vector> detect all objects        # Detect everything on table
-vector> world                     # Show world model state
-vector> help                      # Show all commands
-vector> q                         # Quit
+python run.py                  # Real hardware + CLI
+python run.py --sim            # MuJoCo sim + viewer + CLI
+python run.py --sim-headless   # MuJoCo sim headless
+python run.py --dashboard      # Textual TUI dashboard
+python run.py --web --sim      # Web dashboard at localhost:8000
 ```
 
 ## Custom Skills
 
 ```python
-from vector_os_nano import Agent, SO101
-from vector_os_nano.core.skill import SkillContext
+from vector_os_nano.core.skill import skill, SkillContext
 from vector_os_nano.core.types import SkillResult
 
+@skill(aliases=["wave", "挥手", "打招呼"], direct=False, auto_steps=["wave"])
 class WaveSkill:
     name = "wave"
-    description = "Wave the arm back and forth"
+    description = "Wave the arm as a greeting"
     parameters = {"times": {"type": "integer", "default": 3}}
     preconditions = []
     postconditions = []
@@ -261,47 +227,36 @@ class WaveSkill:
             context.arm.move_joints(joints, duration=0.5)
         return SkillResult(success=True)
 
-agent = Agent(arm=SO101(port="/dev/ttyACM0"), skills=[WaveSkill()])
-agent.execute("wave 5 times")  # LLM discovers and uses the skill
-```
-
-## ROS2 Mode (Optional)
-
-ROS2 is **not required** for basic operation. For advanced features (lifecycle management, TF2, multi-robot):
-
-```bash
-python3 -m venv .venv --system-site-packages --prompt vector_os_nano
-source .venv/bin/activate
-pip install -e ".[all]"
-ros2 launch vector_os_nano nano.launch.py serial_port:=/dev/ttyACM0
+agent.register_skill(WaveSkill())
+agent.execute("wave")       # alias match → direct execute
+agent.execute("挥手三次")    # alias match → LLM fills params
 ```
 
 ## Project Structure
 
 ```
 vector_os_nano/
-├── core/          Agent, Planner, Executor, WorldModel, Skill protocol
-├── llm/           Claude/OpenAI/Local LLM providers + planning prompts
-├── perception/    RealSense camera, Moondream VLM, EdgeTAM tracker, pointcloud
+├── core/          SkillFlow protocol, Agent pipeline, Executor, WorldModel
+├── llm/           Claude provider (classify, plan, chat, summarize)
+├── perception/    RealSense + Moondream VLM + EdgeTAM tracker
 ├── hardware/
-│   ├── so101/     SO-101 arm driver (Feetech STS3215 serial, Pinocchio IK)
-│   └── sim/       MuJoCo simulation (arm, gripper, perception, MJCF scene)
-├── skills/        pick, place, home, scan, detect
-├── cli/           SimpleCLI (readline) + Textual TUI Dashboard
-└── ros2/          Optional ROS2 nodes + launch file (5 nodes)
+│   ├── so101/     SO-101 arm driver (Feetech serial, Pinocchio IK)
+│   └── sim/       MuJoCo simulation (arm, gripper, perception, 6 objects)
+├── skills/        Built-in @skill classes (pick, place, home, scan, detect, gripper)
+├── cli/           Rich CLI with prompt_toolkit (auto-complete, status bar)
+├── web/           FastAPI + WebSocket dashboard
+└── ros2/          Optional ROS2 integration (5 nodes)
 ```
 
 ## What's Coming
 
-Vector OS Nano is a proof of value for the grasping module. The full Vector OS stack under development at **CMU Robotics Institute** includes:
+The full Vector OS stack under development at **CMU Robotics Institute**:
 
-- **SLAM + Navigation** -- LiDAR/visual SLAM, Nav2 integration, multi-floor mapping
+- **SLAM + Navigation** -- LiDAR/visual SLAM, Nav2, multi-floor mapping
 - **Semantic Mapping** -- 3D scene graphs, object permanence, spatial reasoning
 - **Multi-Robot Coordination** -- fleet management, task allocation, shared world model
 - **Mobile Manipulation** -- wheeled, legged, and humanoid platforms
-- **Explainable Planning** -- neuro-symbolic task decomposition with reasoning traces
-- **Visual Servoing** -- sub-millimeter closed-loop precision manipulation
-- **Multi-Modal HRI** -- voice, gesture, gaze-aware human-robot interaction
+- **MCP Server** -- expose skills via Model Context Protocol for external agent integration
 
 **Star this repo and stay tuned.**
 
@@ -319,16 +274,25 @@ from vector_os_nano import Agent, SO101
 
 arm = SO101(port="/dev/ttyACM0")
 agent = Agent(arm=arm, llm_api_key="sk-...")
-agent.execute("抓起红色杯子")
+agent.execute("抓起红色杯子放到左边")
 ```
 
 没有硬件？用 MuJoCo 仿真：
 
 ```bash
-python run.py --sim    # 打开 3D 仿真窗口
+python run.py --sim
 ```
 
-仿真包含 SO-101 真实 STL 模型、6 个可抓取物体（香蕉、杯子、瓶子、螺丝刀、鸭子、乐高积木），支持中文自然语言指令。
+## SkillFlow 协议
+
+所有命令路由通过 `@skill` 装饰器声明，零硬编码：
+
+```python
+@skill(aliases=["抓", "拿", "抓起"], auto_steps=["scan", "detect", "pick"])
+class PickSkill: ...
+```
+
+简单命令（home, open, close）零 LLM 调用，常见模式（抓X）自动编排，复杂任务才用 LLM 规划。
 
 ## 快速开始
 
@@ -337,23 +301,8 @@ cd vector_os_nano
 python3 -m venv .venv --prompt vector_os_nano
 source .venv/bin/activate
 pip install -e ".[all]"
-pip install mujoco httpx
 python run.py --sim
 ```
-
-## 硬件（总计约 $420）
-
-| 组件 | 型号 | 成本 |
-|------|------|------|
-| 机械臂 | LeRobot SO-ARM100 | 约 $150 |
-| 相机 | Intel RealSense D405 | 约 $270 |
-| GPU | 任意 NVIDIA 8GB+ 显存 | （已有） |
-
-## 即将到来
-
-**CMU 机器人研究所** 正在开发完整 Vector OS 栈：SLAM、导航、语义建图、多机协调、移动操作、可解释规划、视觉伺服。
-
-**Star 这个仓库，敬请关注。**
 
 </details>
 

@@ -1,155 +1,145 @@
-# Development Status — v0.2.0 COMPLETE + v0.3.0 Planning
+# Development Status — v0.2.0 COMPLETE
 
 **Session Date:** 2026-03-23  
 **Project:** Vector OS Nano SDK  
-**Status:** v0.2.0 features merged, ready for v0.3.0 planning
+**Status:** v0.2.0 stable release complete, ready for v0.3.0 planning
 
 ---
 
-## Completion Summary
+## v0.2.0 Final Completion Summary
 
-### v0.2.0 Wave 1: LLM Memory + Model Router (COMPLETE 2026-03-23)
+### Features Delivered
 
-| Component | Status | Tests | Files |
-|-----------|--------|-------|-------|
-| SessionMemory (core/memory.py) | DONE | 44/44 ✓ | 1 new |
-| ModelRouter (llm/router.py) | DONE | 34/34 ✓ | 1 new |
-| Agent integration (core/agent.py) | DONE | 42/42 ✓ | 1 modified |
-| LLM providers (llm/*.py) | DONE | — | 3 modified |
-| Config (config/default.yaml) | DONE | — | 1 modified |
-| Integration tests | DONE | 42/42 ✓ | 1 modified |
+**Phase 1: LLM Memory + Model Router**
+- SessionMemory: Persistent cross-task conversation history (50 entries max)
+- ModelRouter: Complexity-driven model selection (Haiku for simple, Sonnet for complex)
+- Agent integration: Fixed conversation history reset bug
+- 120 new tests passing (78 unit + 42 integration)
 
-**Summary:** Cross-task memory fixed. Agent now retains conversation history across multiple commands. ModelRouter selects Haiku (simple) vs Sonnet (complex) per stage, reducing cost while maintaining quality.
+**Phase 2: MCP Server**
+- MCP tools: 7 skill tools (pick, place, home, scan, detect, open, close) + natural_language meta-tool
+- MCP resources: 6 resources (world state, 3 camera views, object list, detailed state)
+- VectorMCPServer: Full MCP protocol implementation with stdio transport
+- Entry points: --sim, --sim-headless, --hardware modes
+- Claude Desktop integration: .mcp.json auto-connect config
 
-### v0.2.0 Wave 2: MCP Server (COMPLETE 2026-03-23)
+**Phase 2.5: Bug Fixes**
+- JSON Schema float/int type mapping (was causing Claude API 400 errors)
+- Python 3.10+ asyncio.get_event_loop() fix
 
-| Component | Status | Tests | Files |
-|-----------|--------|-------|-------|
-| MCP tools (mcp/tools.py) | DONE | 34/34 ✓ | 1 new |
-| MCP resources (mcp/resources.py) | DONE | 20/20 ✓ | 1 new |
-| MCP server (mcp/server.py) | DONE | 21/21 ✓ | 1 new |
-| MCP entry point (mcp/__main__.py) | DONE | — | 1 new |
-| Build config (pyproject.toml) | DONE | — | 1 modified |
-| Config (config/default.yaml) | DONE | — | 1 modified |
-
-**Summary:** 7 MCP tools (pick, place, home, scan, detect, open, close) + natural_language meta-tool. 6 MCP resources (world state, camera renders). Stdio entry point `vector-os-mcp` ready. Claude Desktop can now directly control robot.
-
----
-
-## Test Metrics
-
+### Test Metrics
 | Category | Count | Status |
 |----------|-------|--------|
-| v0.2.0 new unit tests | 78 | PASS |
-| v0.2.0 new integration tests | 42 | PASS |
-| v0.1.0 unit tests | 671 | PASS |
-| v0.1.0 integration tests | 61 | PASS |
+| v0.2.0 new tests | 120 | PASS |
+| v0.1.0 existing tests | 732 | PASS |
 | Skipped (ROS2 conditional) | 10 | SKIP |
-| **TOTAL** | **862** | **PASS** |
+| **TOTAL** | **852** | **PASS** |
+
+### Files Modified / Created
+**New:**
+- `vector_os_nano/core/memory.py` (SessionMemory + MemoryEntry)
+- `vector_os_nano/llm/router.py` (ModelRouter + ModelSelection)
+- `vector_os_nano/mcp/__init__.py`, `__main__.py`, `tools.py`, `resources.py`, `server.py`
+- `.mcp.json` (Claude Desktop auto-connect)
+- Tests: 5 new unit test modules, 6 new integration tests
+
+**Modified:**
+- `vector_os_nano/core/agent.py` (SessionMemory + ModelRouter integration)
+- `vector_os_nano/llm/claude.py`, `base.py`, `openai_compat.py` (model_override parameter)
+- `config/default.yaml` (models + mcp sections)
+- `pyproject.toml` (mcp>=1.0 optional dependency)
 
 ---
 
-## File Manifest (v0.2.0)
+## MCP Server — Quick Reference
 
-### New files (v0.2.0)
-```
-vector_os_nano/
-├── core/memory.py                      (SessionMemory + MemoryEntry)
-├── llm/router.py                       (ModelRouter + ModelSelection)
-├── mcp/
-│   ├── __init__.py
-│   ├── __main__.py                     (stdio entry: python -m vector_os_nano.mcp)
-│   ├── tools.py                        (7 MCP tools)
-│   ├── resources.py                    (6 MCP resources)
-│   └── server.py                       (VectorMCPServer + create_sim_agent)
-
-tests/unit/
-├── test_memory.py                      (44 tests)
-├── test_router.py                      (34 tests)
-├── test_mcp_tools.py                   (34 tests)
-├── test_mcp_resources.py               (20 tests)
-└── test_mcp_server.py                  (21 tests)
-
-tests/integration/
-└── test_agent.py                       (6 new cross-task tests added)
+### Auto-Connect (Claude Desktop)
+```bash
+# .mcp.json already configured, server runs automatically
+python -m vector_os_nano.mcp --sim --stdio
 ```
 
-### Modified files (v0.2.0)
-```
-vector_os_nano/
-├── core/agent.py                       (SessionMemory + ModelRouter integration)
-├── llm/claude.py                       (model_override parameter)
-├── llm/base.py                         (LLMProvider protocol update)
-├── llm/openai_compat.py                (model_override parameter)
+### Manual Start
+```bash
+# Simulation with viewer
+python -m vector_os_nano.mcp --sim --stdio
 
-config/
-├── default.yaml                        (models + mcp sections added)
+# Headless simulation (no viewer)
+python -m vector_os_nano.mcp --sim-headless --stdio
 
-root/
-└── pyproject.toml                      (mcp>=1.0 optional dependency + console script)
+# Real hardware mode (SO-101 + RealSense + VLM)
+python -m vector_os_nano.mcp --hardware --stdio
 ```
+
+### Switch Hardware Mode
+Edit `.mcp.json` args:
+- `"args": ["-m", "vector_os_nano.mcp", "--sim", "--stdio"]` (current — simulation)
+- `"args": ["-m", "vector_os_nano.mcp", "--hardware", "--stdio"]` (to switch)
+
+### Tools Available
+1. `pick(object)` — Grasp object
+2. `place(location)` — Release at location
+3. `home()` — Safe home position
+4. `scan()` — Move and detect objects
+5. `detect(query)` — Identify object by description
+6. `open()` — Open gripper
+7. `close()` — Close gripper
+8. `natural_language(query)` — Full pipeline: plan → execute → report
+
+### Resources Available
+- `world://state` — Full robot state (JSON)
+- `world://objects` — Detected objects (JSON array)
+- `camera://overhead` — Bird's eye view (PNG)
+- `camera://left` — Left camera (PNG)
+- `camera://right` — Right camera (PNG)
 
 ---
 
-## Next: v0.3.0 Planning
+## v0.3.0 Next Steps
 
-### Proposed v0.3.0 Features
+### Proposed (awaiting Yusen approval)
+1. Claude Code agent team integration
+2. Real RealSense camera feed
+3. Moondream VLM open-vocabulary detection
+4. EdgeTAM continuous tracking
+5. Documentation: Architecture diagrams, MCP setup guide, API reference
 
-1. **Claude Code Integration**
-   - Agent team (Alpha/Beta/Gamma) launch via vscode extension
-   - Shared git worktree + branch management
-   - Progress tracking via agents/devlog/ (status.md + tasks.md)
-
-2. **Enhanced Perception**
-   - Real RealSense camera feed (currently mock)
-   - Moondream VLM integration (open-vocabulary detection)
-   - EdgeTAM tracker for continuous tracking
-
-3. **Optimization**
-   - Parameter tuning (IK solver, QoS settings)
-   - Memory efficiency (streaming perception)
-
-4. **Documentation**
-   - Architecture.md update (SessionMemory + ModelRouter + MCP)
-   - MCP setup guide for Claude Desktop
-   - API docs generation
-
----
-
-## Agent Readiness
-
-| Agent | Model | Status | Next Task |
-|-------|-------|--------|-----------|
+### Agent Readiness
+| Agent | Model | Status | Notes |
+|-------|-------|--------|-------|
 | Lead/Architect | opus | Ready | v0.3.0 spec writing |
-| Alpha (Engineer) | sonnet | Ready | Claude Code testing |
-| Beta (Engineer) | sonnet | Ready | Claude Code testing |
-| Gamma (Engineer) | sonnet | Ready | Claude Code testing |
-| QA (Code Reviewer) | — | Ready | v0.3.0 PRs |
-| Scribe | haiku | Ready | Update docs, track status |
+| Alpha | sonnet | Ready | Claude Code testing |
+| Beta | sonnet | Ready | Claude Code testing |
+| Gamma | sonnet | Ready | Claude Code testing |
+| QA | — | Ready | Code review for v0.3.0 |
+| Scribe | haiku | Ready | Docs tracking |
 
 ---
 
-## Known Blockers (v0.3.0)
+## Known Issues (v0.2.0)
 
-None blocking v0.2.0. Ready for Claude Code team execution.
+None. All critical bugs fixed.
 
 ---
 
-## Documentation Status (v0.2.0)
+## Documentation Status
 
-Updated:
-- `progress.md` — v0.2.0 complete, test counts, CLI/MCP commands added
+**Updated:**
+- `progress.md` — Complete v0.2.0 feature list, MCP entry points, CLI/launcher commands
+- `agents/devlog/status.md` — This file
 
-Pending v0.3.0:
-- `README.md` — Add MCP section, Claude Desktop setup
-- `docs/architecture.md` — SessionMemory/ModelRouter/MCP diagrams
-- `docs/api.md` — MCP tools reference
+**Pending v0.3.0:**
+- `README.md` — MCP section, Claude Desktop setup, hardware mode switcher
+- `docs/architecture.md` — SessionMemory + ModelRouter + MCP flow diagrams
+- `docs/api.md` — MCP tools + resources reference (auto-generated)
+- `QUICKSTART.md` — MCP server startup guide (if needed)
 
 ---
 
 ## Session Notes
 
-- v0.2.0 implementation completed without issues
-- All 78 + 42 new tests pass
-- MCP module optional (mcp>=1.0), doesn't block existing features
-- Ready to transition to Claude Code team for v0.3.0
+- v0.2.0 implementation completed without blockers
+- All 120 new tests pass, no regressions in v0.1.0 tests
+- MCP module optional—doesn't block existing features
+- `.mcp.json` ready for immediate Claude Desktop use
+- Ready to transition to v0.3.0 planning

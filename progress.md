@@ -63,13 +63,22 @@
   - `mcp>=1.0` optional dependency
   - `vector-os-mcp` console script (stdio server)
 
+- [x] `.mcp.json` — Claude Desktop auto-connect config
+  - `--sim --stdio` mode: MuJoCo viewer + stdio transport
+  - Drop-in for Claude Desktop users
+  - Manual modes: `--sim-headless`, `--hardware` (edit args to switch)
+
+### Phase 2.5: Bug Fixes — DONE
+- [x] JSON Schema type mapping: SkillFlow `"float"` → JSON Schema `"number"` (was causing Claude API 400 error)
+- [x] Fixed asyncio.get_event_loop() in test_mcp_server.py for Python 3.10+
+
 ### Test Results v0.2.0
 - Phase 1 unit tests: 78 pass (memory + router)
 - Phase 1 integration tests: 42 pass (agent cross-task memory)
 - Phase 2 unit tests: 75 pass (tools + resources + server)
 - Pre-existing passing tests: 671 pass (v0.1.0 features)
 - Pre-existing skipped: 10 skip (ROS2 conditional)
-- **Total: 866 tests passing**
+- **Total: 852 tests passing**
 
 ---
 
@@ -155,10 +164,11 @@ python run.py --sim -d         # With TUI
 python run.py --web --sim      # Web dashboard
 ```
 
-MCP server (Claude Desktop integration):
+MCP server (Claude Desktop / Claude Code):
 ```bash
-vector-os-mcp                  # Stdio server
-python run.py --mcp            # Stdio server from launcher
+python -m vector_os_nano.mcp --sim --stdio              # Sim mode + stdio (for .mcp.json)
+python -m vector_os_nano.mcp --sim-headless --stdio     # Headless sim + stdio
+python -m vector_os_nano.mcp --hardware --stdio         # Real hardware + stdio
 ```
 
 Testing:

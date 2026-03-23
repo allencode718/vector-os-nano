@@ -343,10 +343,10 @@ class SimpleCLI:
         # Line-by-line reveal
         for i, line in enumerate(logo_lines):
             _console.print(f"[bold {_TEAL}]{line}[/]")
-            time.sleep(0.06)
+            time.sleep(0.12)
 
         _console.print(f"[dim]{'':>40}v{_VERSION}[/]")
-        time.sleep(0.2)
+        time.sleep(0.4)
         _console.print()
         _console.print(f"  [{_TEAL}]Natural language robot arm control + AI chat.[/]")
         _console.print(f"  [dim]Tab = autocomplete  |  Ctrl+R = history  |  'help' = commands[/]")

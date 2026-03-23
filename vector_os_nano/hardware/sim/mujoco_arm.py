@@ -152,7 +152,9 @@ class MuJoCoArm:
                 import mujoco.viewer  # noqa: PLC0415
 
                 self._viewer = mujoco.viewer.launch_passive(
-                    self._model, self._data
+                    self._model, self._data,
+                    show_left_ui=False,
+                    show_right_ui=False,
                 )
             except Exception as exc:
                 logger.warning("MuJoCo viewer failed to launch: %s", exc)

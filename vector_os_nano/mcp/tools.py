@@ -24,7 +24,17 @@ def skills_to_mcp_tools(registry: SkillRegistry) -> list[dict]:
     schemas = registry.to_schemas()
     tools = [skill_schema_to_mcp_tool(s) for s in schemas]
     tools.append(build_natural_language_tool())
+    tools.append(build_diagnostics_tool())
     return tools
+
+
+def build_diagnostics_tool() -> dict:
+    """Build the diagnostics tool for debugging agent state."""
+    return {
+        "name": "diagnostics",
+        "description": "Report agent internal state: arm type, perception backend, calibration, world model objects.",
+        "inputSchema": {"type": "object", "properties": {}},
+    }
 
 
 def build_natural_language_tool() -> dict:
@@ -142,6 +152,9 @@ async def handle_tool_call(
     """
     import asyncio
 
+    if tool_name == "diagnostics":
+        return _run_diagnostics(agent)
+
     if tool_name == "natural_language":
         instruction = arguments.get("instruction", "")
         result = await asyncio.to_thread(agent.execute, instruction)
@@ -151,6 +164,64 @@ async def handle_tool_call(
     result = await asyncio.to_thread(agent.execute_skill, tool_name, arguments)
     label = _build_skill_instruction(tool_name, arguments)
     return _format_execution_result(label, result)
+
+
+def _run_diagnostics(agent: Agent) -> str:
+    """Report full agent internal state for debugging."""
+    lines: list[str] = ["=== AGENT DIAGNOSTICS ==="]
+
+    # Arm
+    arm = agent._arm
+    arm_type = type(arm).__name__ if arm else "None"
+    lines.append(f"Arm: {arm_type}")
+    if arm and hasattr(arm, '_connected'):
+        lines.append(f"  Connected: {arm._connected}")
+
+    # Gripper
+    gripper = agent._gripper
+    lines.append(f"Gripper: {type(gripper).__name__ if gripper else 'None'}")
+
+    # Perception
+    perc = agent._perception
+    perc_type = type(perc).__name__ if perc else "None"
+    lines.append(f"Perception: {perc_type}")
+    if perc is not None:
+        if hasattr(perc, '_vlm'):
+            lines.append(f"  VLM: {type(perc._vlm).__name__ if perc._vlm else 'None'}")
+        if hasattr(perc, '_tracker'):
+            lines.append(f"  Tracker: {type(perc._tracker).__name__ if perc._tracker else 'None'}")
+        if hasattr(perc, '_camera'):
+            cam = perc._camera
+            lines.append(f"  Camera: {type(cam).__name__ if cam else 'None'}")
+            if cam and hasattr(cam, '_pipeline'):
+                lines.append(f"  Camera connected: {cam._pipeline is not None}")
+
+    # Calibration
+    cal = agent._calibration
+    lines.append(f"Calibration: {type(cal).__name__ if cal else 'None (not loaded)'}")
+    if cal and hasattr(cal, '_matrix'):
+        import numpy as np
+        is_identity = np.allclose(cal._matrix, np.eye(4))
+        lines.append(f"  Matrix: {'identity' if is_identity else 'loaded (non-identity)'}")
+
+    # Config
+    cfg = agent._config
+    lines.append(f"LLM provider: {cfg.get('llm', {}).get('provider', 'unknown')}")
+    lines.append(f"LLM model: {cfg.get('llm', {}).get('model', 'unknown')}")
+    lines.append(f"API key: {'set' if cfg.get('llm', {}).get('api_key') else 'NOT set'}")
+
+    # World model
+    world = agent.world
+    if world:
+        objs = world.to_dict().get("objects", [])
+        lines.append(f"World objects: {len(objs)}")
+        for o in objs[:5]:
+            lines.append(f"  - {o.get('label', '?')} at ({o.get('x', 0):.3f}, {o.get('y', 0):.3f}, {o.get('z', 0):.3f})")
+
+    # Skills
+    lines.append(f"Skills: {', '.join(agent.skills)}")
+
+    return "\n".join(lines)
 
 
 def _build_skill_instruction(skill_name: str, arguments: dict[str, Any]) -> str:

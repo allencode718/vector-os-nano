@@ -1,15 +1,16 @@
 """Vector OS Nano — Interactive CLI with AI Chat.
 
-Rich-powered interactive shell with:
+Rich + prompt_toolkit powered interactive shell with:
 - Robot command execution via unified Agent pipeline
 - AI conversation with Claude Haiku (multi-turn memory)
-- Beautiful terminal output with panels, spinners, tables
+- Auto-completion for commands and object names
+- Bottom status bar showing robot state
+- Beautiful terminal output with panels and tables
 """
 from __future__ import annotations
 
 import json
 import logging
-import readline  # noqa: F401 — enables line editing and history
 import sys
 import time
 from typing import Any
@@ -17,17 +18,19 @@ from typing import Any
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 from rich import box
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter, merge_completers
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import InMemoryHistory
 
 logger = logging.getLogger(__name__)
 
 from vector_os_nano.version import __version__ as _VERSION
 
-# Rich console instance
 _console = Console()
 
-# Brand color
 _TEAL = "#00b4b4"
 _DIM_TEAL = "#006666"
 
@@ -55,12 +58,71 @@ class SimpleCLI:
         self._verbose = verbose
         self._running: bool = False
 
+        # Build completers
+        cmd_words = list(self.COMMANDS.keys()) + ["chat"]
+        object_words: list[str] = []
+        if agent and hasattr(agent, '_arm') and agent._arm and hasattr(agent._arm, 'get_object_positions'):
+            try:
+                object_words = list(agent._arm.get_object_positions().keys())
+            except Exception:
+                pass
+
+        # Common Chinese phrases
+        cn_phrases = [
+            "抓", "放到", "前面", "后面", "左边", "右边", "中间",
+            "左前方", "右前方", "左后方", "右后方",
+            "所有", "随便", "桌上有什么", "你好", "帮我",
+        ]
+
+        self._completer = merge_completers([
+            WordCompleter(cmd_words + object_words + cn_phrases, ignore_case=True),
+        ])
+        self._session = PromptSession(
+            history=InMemoryHistory(),
+            completer=self._completer,
+            complete_while_typing=False,
+        )
+
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
+    def _get_toolbar(self) -> HTML:
+        """Build bottom toolbar showing robot status."""
+        parts = []
+        if self._agent and self._agent._arm:
+            if hasattr(self._agent._arm, 'get_object_positions'):
+                parts.append('<b>SIM</b>')
+            else:
+                parts.append('<b>REAL</b>')
+
+            if self._agent._gripper:
+                try:
+                    pos = self._agent._gripper.get_position()
+                    holding = self._agent._gripper.is_holding()
+                    grip = "open" if pos > 0.5 else "closed"
+                    if holding:
+                        grip += f" [holding: {self._agent._gripper._held_object}]"
+                    parts.append(f'gripper: {grip}')
+                except Exception:
+                    pass
+
+            if hasattr(self._agent._arm, 'get_object_positions'):
+                try:
+                    n = len(self._agent._arm.get_object_positions())
+                    parts.append(f'objects: {n}')
+                except Exception:
+                    pass
+
+            has_llm = hasattr(self._agent, '_llm') and self._agent._llm is not None
+            parts.append(f'LLM: {"on" if has_llm else "off"}')
+        else:
+            parts.append('no arm')
+
+        return HTML(f' <b>vector</b> | {" | ".join(parts)} ')
+
     def run(self) -> None:
-        """Main readline input loop."""
+        """Main prompt_toolkit input loop."""
         self._running = True
         if not self._verbose:
             self._quiet_logging()
@@ -68,7 +130,10 @@ class SimpleCLI:
 
         while self._running:
             try:
-                user_input = _console.input(f"[{_TEAL}]vector>[/] ").strip()
+                user_input = self._session.prompt(
+                    HTML('<ansibrightcyan>vector&gt;</ansibrightcyan> '),
+                    bottom_toolbar=self._get_toolbar,
+                ).strip()
             except (KeyboardInterrupt, EOFError):
                 _console.print()
                 self._running = False
@@ -85,7 +150,26 @@ class SimpleCLI:
                 _console.print(f"[red]Error: {exc}[/]")
                 logger.exception("Unhandled error")
 
-        _console.print(f"[dim]Goodbye.[/]")
+            # Refresh object completer after each command
+            self._refresh_completer()
+
+        _console.print("[dim]Goodbye.[/]")
+
+    def _refresh_completer(self) -> None:
+        """Update auto-complete words with current object names."""
+        if not self._agent or not self._agent._arm:
+            return
+        if hasattr(self._agent._arm, 'get_object_positions'):
+            try:
+                objs = list(self._agent._arm.get_object_positions().keys())
+                cmd_words = list(self.COMMANDS.keys()) + ["chat"]
+                cn = ["抓", "放到", "前面", "后面", "左边", "右边", "中间",
+                      "左前方", "右前方", "所有", "随便", "桌上有什么"]
+                self._session.completer = WordCompleter(
+                    cmd_words + objs + cn, ignore_case=True,
+                )
+            except Exception:
+                pass
 
     def _handle_input(self, text: str) -> None:
         """Route input: built-in CLI commands or Agent pipeline."""

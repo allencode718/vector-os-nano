@@ -127,15 +127,20 @@ class VectorMCPServer:
 
 
 # ---------------------------------------------------------------------------
-# Simulation agent factory
+# Agent factories
 # ---------------------------------------------------------------------------
+
+
+def _log(msg: str) -> None:
+    """Log to stderr (stdout is reserved for MCP stdio transport)."""
+    import sys
+    print(msg, file=sys.stderr, flush=True)
 
 
 def create_sim_agent(headless: bool = True) -> Agent:
     """Create an Agent with MuJoCo simulation backend.
 
-    Mirrors the initialisation in run.py _init_sim() but simplified for MCP
-    use (no calibration YAML loading, direct Agent construction).
+    Mirrors run.py _init_sim() for MCP use.
 
     Args:
         headless: If True (default), no MuJoCo viewer window.
@@ -144,17 +149,16 @@ def create_sim_agent(headless: bool = True) -> Agent:
     Returns:
         A fully connected Agent ready for skill execution.
     """
-    from vector_os_nano.core.config import load_config  # noqa: PLC0415
     from vector_os_nano.hardware.sim.mujoco_arm import MuJoCoArm  # noqa: PLC0415
     from vector_os_nano.hardware.sim.mujoco_gripper import MuJoCoGripper  # noqa: PLC0415
     from vector_os_nano.hardware.sim.mujoco_perception import MuJoCoPerception  # noqa: PLC0415
+    from vector_os_nano.perception.calibration import Calibration  # noqa: PLC0415
 
-    logger.info("Starting MuJoCo simulation (headless=%s)", headless)
+    _log(f"[MCP] Starting MuJoCo simulation (headless={headless})...")
 
-    # Load config — try user.yaml first, fall back to defaults
     cfg = _load_config_with_fallback()
 
-    # Apply sim-specific overrides (mirrors run.py _init_sim)
+    # Sim-specific overrides (mirrors run.py _init_sim)
     cfg.setdefault("skills", {}).setdefault("pick", {}).update(
         {
             "z_offset": 0.0,
@@ -169,16 +173,22 @@ def create_sim_agent(headless: bool = True) -> Agent:
     )
     cfg["sim_move_duration"] = 3.0
 
-    # Create sim hardware
     arm = MuJoCoArm(gui=not headless)
     arm.connect()
+    _log(f"[MCP] Sim arm connected. Joints: {[round(j, 2) for j in arm.get_joint_positions()]}")
 
     gripper = MuJoCoGripper(arm)
     gripper.close()
 
-    perception = MuJoCoPerception(arm)
+    objs = arm.get_object_positions()
+    if objs:
+        _log(f"[MCP] Scene objects: {', '.join(objs.keys())}")
 
-    # API key from config or environment
+    perception = MuJoCoPerception(arm)
+    _log("[MCP] Sim perception ready (ground-truth mode).")
+
+    calibration = Calibration()  # identity — sim positions are world-frame
+
     api_key = cfg.get("llm", {}).get("api_key") or os.environ.get("OPENROUTER_API_KEY")
 
     agent = Agent(
@@ -188,8 +198,114 @@ def create_sim_agent(headless: bool = True) -> Agent:
         llm_api_key=api_key,
         config=cfg,
     )
+    agent._calibration = calibration
 
-    logger.info("Sim agent created. Skills: %s", agent.skills)
+    _log(f"[MCP] Sim agent ready. Skills: {agent.skills}")
+    return agent
+
+
+def create_hardware_agent() -> Agent:
+    """Create an Agent with real SO-101 hardware.
+
+    Mirrors run.py _init_hardware() for MCP use.
+    Starts: SO-101 arm + RealSense D405 + Moondream VLM + EdgeTAM tracker.
+
+    Returns:
+        A fully connected Agent ready for skill execution.
+    """
+    cfg = _load_config_with_fallback()
+    api_key = cfg.get("llm", {}).get("api_key") or os.environ.get("OPENROUTER_API_KEY")
+
+    # --- Arm ---
+    arm = None
+    gripper = None
+    try:
+        from vector_os_nano.hardware.so101 import SO101Arm, SO101Gripper  # noqa: PLC0415
+        port = cfg.get("arm", {}).get("port", "/dev/ttyACM0")
+        _log(f"[MCP] Connecting arm on {port}...")
+        arm = SO101Arm(port=port)
+        arm.connect()
+        gripper = SO101Gripper(arm._bus)
+        joints = [round(j, 2) for j in arm.get_joint_positions()]
+        _log(f"[MCP] Arm connected. Joints: {joints}")
+    except Exception as exc:
+        _log(f"[MCP] Arm not available: {exc}")
+
+    # --- Perception (camera + VLM + tracker) ---
+    perception = None
+    try:
+        from vector_os_nano.perception.realsense import RealSenseCamera  # noqa: PLC0415
+        from vector_os_nano.perception.vlm import VLMDetector  # noqa: PLC0415
+        from vector_os_nano.perception.tracker import EdgeTAMTracker  # noqa: PLC0415
+        from vector_os_nano.perception.pipeline import PerceptionPipeline  # noqa: PLC0415
+
+        _log("[MCP] Connecting camera (RealSense D405)...")
+        camera = RealSenseCamera()
+        camera.connect()
+        _log("[MCP] Camera connected.")
+
+        vlm_model = (
+            cfg.get("perception", {}).get("vlm_model")
+            or os.environ.get("MOONDREAM_MODEL", "vikhyatk/moondream2")
+        )
+        _log(f"[MCP] Loading VLM ({vlm_model})...")
+        vlm = VLMDetector()
+        _log("[MCP] VLM loaded.")
+
+        _log("[MCP] Loading tracker (EdgeTAM)...")
+        tracker = EdgeTAMTracker()
+        _log("[MCP] Tracker loaded.")
+
+        perception = PerceptionPipeline(camera=camera, vlm=vlm, tracker=tracker)
+        _log("[MCP] Perception pipeline ready.")
+    except Exception as exc:
+        _log(f"[MCP] Perception not available: {exc}")
+
+    # --- Calibration ---
+    calibration = None
+    try:
+        cal_file = cfg.get("calibration", {}).get(
+            "file", "config/workspace_calibration.yaml"
+        )
+        if cal_file and os.path.exists(cal_file):
+            if cal_file.endswith((".yaml", ".yml")):
+                # Use the same YAML loader from run.py
+                import yaml  # noqa: PLC0415
+                import numpy as np  # noqa: PLC0415
+                from vector_os_nano.perception.calibration import Calibration  # noqa: PLC0415
+                with open(cal_file, "r", encoding="utf-8") as fh:
+                    data = yaml.safe_load(fh)
+                if isinstance(data, dict):
+                    calibration = Calibration()
+                    raw_matrix = data.get("transform_matrix")
+                    if raw_matrix is not None:
+                        matrix = np.array(raw_matrix, dtype=np.float64)
+                        if matrix.shape == (4, 4):
+                            calibration._matrix = matrix
+                    _log(f"[MCP] Calibration loaded from {cal_file}")
+            else:
+                from vector_os_nano.perception.calibration import Calibration  # noqa: PLC0415
+                calibration = Calibration.load(cal_file)
+                _log(f"[MCP] Calibration loaded from {cal_file}")
+        else:
+            _log(f"[MCP] No calibration file at {cal_file!r}")
+    except Exception as exc:
+        _log(f"[MCP] Calibration load failed: {exc}")
+
+    agent = Agent(
+        arm=arm,
+        gripper=gripper,
+        perception=perception,
+        llm_api_key=api_key,
+        config=cfg,
+    )
+    if calibration is not None:
+        agent._calibration = calibration
+
+    _log(f"[MCP] Hardware agent ready. Skills: {agent.skills}")
+    _log(f"[MCP] Arm: {'connected' if arm else 'NOT available'}")
+    _log(f"[MCP] Perception: {'ready' if perception else 'NOT available'}")
+    _log(f"[MCP] Calibration: {'loaded' if calibration else 'NOT loaded'}")
     return agent
 
 
@@ -219,26 +335,33 @@ async def main() -> None:
     import argparse  # noqa: PLC0415
 
     parser = argparse.ArgumentParser(description="Vector OS Nano MCP Server")
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--sim",
         action="store_true",
-        help="Use MuJoCo simulation with viewer window",
+        help="MuJoCo simulation with viewer window",
     )
-    parser.add_argument(
+    mode.add_argument(
         "--sim-headless",
         action="store_true",
-        help="Use MuJoCo simulation without viewer (default)",
+        help="MuJoCo simulation without viewer",
+    )
+    mode.add_argument(
+        "--hardware",
+        action="store_true",
+        help="Real SO-101 arm + RealSense + VLM",
     )
     args = parser.parse_args()
 
-    # --sim-headless takes priority; --sim opens viewer; no flag defaults to headless
-    headless = True
-    if args.sim:
-        headless = False
-    if args.sim_headless:
-        headless = True
-
-    agent = create_sim_agent(headless=headless)
+    if args.hardware:
+        agent = create_hardware_agent()
+    elif args.sim:
+        agent = create_sim_agent(headless=False)
+    elif args.sim_headless:
+        agent = create_sim_agent(headless=True)
+    else:
+        # Default: headless sim
+        agent = create_sim_agent(headless=True)
 
     server = VectorMCPServer(agent)
     try:

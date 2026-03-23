@@ -1,7 +1,7 @@
 # Vector OS Nano SDK — Progress
 
 **Last updated:** 2026-03-22
-**Status:** v0.1.0 — MuJoCo sim + Multi-stage Agent Pipeline + AI Chat + Web Dashboard
+**Status:** v0.1.0 — SkillFlow protocol + MuJoCo sim + Multi-stage Agent Pipeline + AI Chat
 
 ## What Works
 
@@ -27,32 +27,40 @@
 User Input
     |
     v
-[Stage 1: CLASSIFY] — Haiku, fast intent detection
-    → chat | task | direct | query
+[Stage 1: MATCH] — @skill alias matching (zero LLM)
+    Match + direct=True  → Execute immediately (home, open, close)
+    Match + auto_steps   → Expand chain (scan→detect→pick→home)
+    Match + complex      → Stage 3 (LLM plan)
+    No match             → Stage 2
     |
-[Stage 2: ROUTE]
-    chat    → LLM response (V speaks, no action)
-    direct  → immediate skill execution (home, open, close)
-    query   → scan + detect + LLM summarize results
-    task    → Stage 3
+[Stage 2: CLASSIFY] — Haiku, fast intent detection
+    → chat | task | query
     |
 [Stage 3: PLAN] — Haiku, task decomposition
-    Input: user goal + skills + world state + objects
-    Output: { message: "好的主人...", steps: [scan, detect, pick, ...] }
-    → V speaks message BEFORE execution starts
+    Input: user goal + @skill schemas + world state
+    Output: { message: "好的主人...", steps: [...] }
     |
 [Stage 4: EXECUTE] — deterministic, no LLM
-    For each step:
-      - Show progress: [1/5] pick
-      - Execute skill
-      - Check pre/postconditions
-      - On failure → Stage 5
+    Run skills step by step, show progress
     |
-[Stage 5: ADAPT] — retry with context (up to 3 attempts)
+[Stage 5: ADAPT] — on failure, retry or explain
     |
-[Stage 6: SUMMARIZE] — Haiku, post-execution
-    → V reports what was done, what succeeded/failed
+[Stage 6: SUMMARIZE] — Haiku, result report
 ```
+
+### SkillFlow Protocol
+
+All routing is declarative via `@skill` decorator — zero hard-coded command matching:
+
+```python
+@skill(aliases=["grab", "抓", "拿"], auto_steps=["scan", "detect", "pick"])
+class PickSkill: ...
+
+@skill(aliases=["close", "grip", "夹紧"], direct=True)
+class GripperCloseSkill: ...
+```
+
+See docs/skill-protocol.md for full specification.
 
 ### System Layers
 
@@ -145,13 +153,17 @@ vector> q                       # Quit
 ### 2. ~~Multi-stage Agent Pipeline~~ DONE
 ### 3. ~~AI Chat (V)~~ DONE
 
-### 4. LLM Agent Brain Upgrade
-- Skill Manifest Protocol (ADR-002), richer skill descriptions
-- Better creative task decomposition
+### 4. ~~SkillFlow Protocol~~ DONE
+- @skill decorator with aliases, direct, auto_steps
+- Alias-based routing replaces all hard-coded commands
+- GripperOpen/Close as proper skill classes
+
+### 5. LLM Agent Enhancements
 - Multi-turn planning memory across commands
 - Model auto-select (Haiku for simple, Sonnet for complex)
+- MCP server to expose skills externally
 
-### 5. Pick Accuracy
+### 6. Pick Accuracy
 - Re-calibration, hand-eye calibration
 - Grasp success detection via servo current/load
 

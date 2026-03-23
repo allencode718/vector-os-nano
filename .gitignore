@@ -27,3 +27,4 @@ test_full_pipeline.py
 test_agent_hardware.py
 test_ik.py
 mjmodel.mjb
+mjmodel.mjb

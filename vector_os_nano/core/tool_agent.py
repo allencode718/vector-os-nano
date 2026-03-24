@@ -71,7 +71,7 @@ class ToolAgent:
         self,
         agent_ref: Any,
         api_key: str,
-        model: str = "openai/gpt-4o-mini",
+        model: str = "openai/gpt-4o",
         api_base: str = "https://openrouter.ai/api/v1",
     ) -> None:
         self._agent = agent_ref
@@ -163,7 +163,7 @@ class ToolAgent:
                 "tools": self._tools,
                 "tool_choice": "auto",
                 "temperature": 0.3,
-                "max_tokens": 1024,
+                "max_tokens": 2048,
             }
 
             _dbg("LLM_CALL", f"round={round_idx}, model={self._model}, msgs={len(self._messages)}")
@@ -173,14 +173,28 @@ class ToolAgent:
                 resp.raise_for_status()
                 data = resp.json()
             except Exception as exc:
-                logger.warning("[ToolAgent] API error: %s", exc)
+                # Log response body for debugging
+                body = ""
+                if hasattr(exc, 'response') and exc.response is not None:
+                    body = exc.response.text[:500]
+                logger.warning("[ToolAgent] API error: %s | body: %s", exc, body)
                 error_msg = f"API error: {exc}"
+                if body:
+                    error_msg += f"\n{body}"
                 self._messages.append({"role": "assistant", "content": error_msg})
                 return error_msg
 
-            choice = data["choices"][0]
-            message = choice["message"]
-            finish_reason = choice.get("finish_reason", "")
+            try:
+                choice = data["choices"][0]
+                message = choice["message"]
+                finish_reason = choice.get("finish_reason", "")
+            except (KeyError, IndexError, TypeError) as exc:
+                _dbg("PARSE_ERROR", f"Unexpected response structure: {str(data)[:300]}")
+                error_msg = f"Unexpected API response: {str(data)[:200]}"
+                self._messages.append({"role": "assistant", "content": error_msg})
+                return error_msg
+
+            _dbg("RESPONSE_RAW", f"finish_reason={finish_reason}, has_tool_calls={bool(message.get('tool_calls'))}, content_len={len(message.get('content') or '')}")
 
             # Case 1: LLM wants to call tool(s)
             tool_calls = message.get("tool_calls")
@@ -215,8 +229,10 @@ class ToolAgent:
                 continue
 
             # Case 2: LLM responds with text (no tool call)
-            text = message.get("content", "")
-            _dbg("RESPONSE", f"text ({len(text)} chars)")
+            text = message.get("content") or ""
+            if finish_reason == "length" and not text:
+                text = "(Response truncated — try a shorter question)"
+            _dbg("RESPONSE", f"text ({len(text)} chars, finish={finish_reason})")
             self._messages.append({"role": "assistant", "content": text})
             return text
 

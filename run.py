@@ -373,21 +373,22 @@ def _start_camera_viewer(perception):
                 if color is None or depth is None:
                     continue
 
-                rgb_display = color.copy()
+                # color is RGB from camera; convert to BGR for OpenCV display
+                bgr_display = cv2.cvtColor(color, cv2.COLOR_RGB2BGR)
                 if hasattr(perception, '_last_tracked') and perception._last_tracked:
                     for obj in perception._last_tracked:
                         if obj.bbox_2d:
                             x1, y1, x2, y2 = [int(v) for v in obj.bbox_2d]
-                            cv2.rectangle(rgb_display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            cv2.rectangle(bgr_display, (x1, y1), (x2, y2), (0, 255, 0), 2)
                             lbl = obj.label
                             if obj.pose:
                                 lbl += f" ({obj.pose.x:.2f},{obj.pose.y:.2f},{obj.pose.z:.2f})"
-                            rgb_display = _put_text_pil(rgb_display, lbl, (x1, max(y1 - 20, 0)))
+                            bgr_display = _put_text_pil(bgr_display, lbl, (x1, max(y1 - 20, 0)))
                 elif hasattr(perception, '_last_detections') and perception._last_detections:
                     for det in perception._last_detections:
                         x1, y1, x2, y2 = [int(v) for v in det.bbox]
-                        cv2.rectangle(rgb_display, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        rgb_display = _put_text_pil(rgb_display, det.label, (x1, max(y1 - 20, 0)))
+                        cv2.rectangle(bgr_display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        bgr_display = _put_text_pil(bgr_display, det.label, (x1, max(y1 - 20, 0)))
 
                 depth_f = np.clip(depth.astype(np.float32), 0, 500)
                 depth_u8 = (depth_f / 500.0 * 255).astype(np.uint8)
@@ -409,7 +410,7 @@ def _start_camera_viewer(perception):
                             cv2.putText(depth_colored, info, (cx + 10, cy),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
-                combined = np.hstack([rgb_display, depth_colored])
+                combined = np.hstack([bgr_display, depth_colored])
                 cv2.imshow("Vector OS", combined)
                 if cv2.waitKey(33) == 27:
                     break
@@ -440,7 +441,7 @@ def _run_agent_mode(agent, cfg, api_key, args) -> None:
 
     from vector_os_nano.core.tool_agent import ToolAgent
 
-    model = args.agent_model or cfg.get("llm", {}).get("models", {}).get("agent", "openai/gpt-4o-mini")
+    model = args.agent_model or cfg.get("llm", {}).get("models", {}).get("agent", "openai/gpt-4o")
     api_base = cfg.get("llm", {}).get("api_base", "https://openrouter.ai/api/v1")
 
     tool_agent = ToolAgent(
@@ -497,22 +498,27 @@ def _run_agent_mode(agent, cfg, api_key, args) -> None:
             if args.verbose:
                 console.print(f"  [dim cyan][{stage}][/] [dim]{detail}[/]")
 
-        response = tool_agent.chat(
-            user_input,
-            on_tool_call=_on_tool_call,
-            on_debug=_on_debug,
-        )
+        try:
+            response = tool_agent.chat(
+                user_input,
+                on_tool_call=_on_tool_call,
+                on_debug=_on_debug,
+            )
+        except Exception as exc:
+            response = f"Error: {exc}"
+            console.print(f"  [red]Agent error: {exc}[/]")
 
-        console.print()
-        console.print(Panel(
-            response,
-            title="[bold]V[/]",
-            title_align="left",
-            border_style=_teal,
-            padding=(0, 1),
-            width=min(console.width, 70),
-        ))
-        console.print()
+        if response:
+            console.print()
+            console.print(Panel(
+                response,
+                title="[bold]V[/]",
+                title_align="left",
+                border_style=_teal,
+                padding=(0, 1),
+                width=min(console.width, 70),
+            ))
+            console.print()
 
     # Cleanup camera viewer
     if stop_camera is not None:

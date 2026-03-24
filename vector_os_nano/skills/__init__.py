@@ -7,6 +7,7 @@ from vector_os_nano.skills.home import HomeSkill
 from vector_os_nano.skills.pick import PickSkill
 from vector_os_nano.skills.place import PlaceSkill
 from vector_os_nano.skills.scan import ScanSkill
+from vector_os_nano.skills.wave import WaveSkill
 
 __all__ = [
     "DetectSkill",
@@ -16,6 +17,7 @@ __all__ = [
     "PickSkill",
     "PlaceSkill",
     "ScanSkill",
+    "WaveSkill",
     "get_default_skills",
 ]
 
@@ -30,4 +32,5 @@ def get_default_skills() -> list:
         PlaceSkill(),
         GripperOpenSkill(),
         GripperCloseSkill(),
+        WaveSkill(),
     ]

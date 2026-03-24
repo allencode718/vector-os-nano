@@ -142,8 +142,22 @@ class WorldModel:
         return list(self._objects.values())
 
     def get_objects_by_label(self, label: str) -> list[ObjectState]:
-        """Return all objects matching the given label."""
-        return [o for o in self._objects.values() if o.label == label]
+        """Return all objects matching the given label (case-insensitive, normalised).
+
+        Matching rules (in priority order):
+        1. Exact normalised match (e.g. "protein bar" == "Protein Bar")
+        2. Query is a substring of the stored label or vice versa
+        """
+        def _norm(s: str) -> str:
+            return s.lower().strip().replace("_", " ")
+
+        query = _norm(label)
+        results: list[ObjectState] = []
+        for o in self._objects.values():
+            obj_label = _norm(o.label)
+            if obj_label == query or query in obj_label or obj_label in query:
+                results.append(o)
+        return results
 
     # ------------------------------------------------------------------
     # Robot state

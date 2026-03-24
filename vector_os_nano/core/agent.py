@@ -339,15 +339,22 @@ class Agent:
                 postconditions=[],
             ))
 
-        # Add home at end
-        steps.append(TaskStep(
-            step_id=f"s{len(steps)+1}",
-            skill_name="home",
-            parameters={},
-            depends_on=[f"s{len(steps)}"],
-            preconditions=[],
-            postconditions=[],
-        ))
+        # Add home at end — but NOT when pick mode='hold' (pick already
+        # returns to home internally, and HomeSkill opens the gripper which
+        # would drop the held object).
+        skip_home = (
+            match.skill_name == "pick"
+            and any(s.parameters.get("mode") == "hold" for s in steps)
+        )
+        if not skip_home:
+            steps.append(TaskStep(
+                step_id=f"s{len(steps)+1}",
+                skill_name="home",
+                parameters={},
+                depends_on=[f"s{len(steps)}"],
+                preconditions=[],
+                postconditions=[],
+            ))
 
         plan = TaskPlan(goal=instruction, steps=steps)
 
@@ -689,8 +696,10 @@ class Agent:
             if step_skill == skill_name:
                 # Pass ALL original params to the target skill
                 step_params = dict(params)
-            # detect step: use default "all objects" (matches CLI behavior).
-            # Specific object matching is handled by pick's world model fallback.
+            elif step_skill == "detect" and object_query:
+                # Pass specific query to detect step so VLM returns matching labels.
+                # "all objects" causes label mismatches in world model fallback.
+                step_params = {"query": object_query}
             steps.append(TaskStep(
                 step_id=f"s{i+1}",
                 skill_name=step_skill,
@@ -700,8 +709,14 @@ class Agent:
                 postconditions=[],
             ))
 
-        # Add home at end if not already there
-        if not steps or steps[-1].skill_name != "home":
+        # Add home at end if not already there — but NOT when pick mode='hold'
+        # (pick already returns to home internally, and HomeSkill opens the
+        # gripper which would drop the held object).
+        skip_home = (
+            skill_name == "pick"
+            and params.get("mode") == "hold"
+        )
+        if not skip_home and (not steps or steps[-1].skill_name != "home"):
             steps.append(TaskStep(
                 step_id=f"s{len(steps)+1}",
                 skill_name="home",

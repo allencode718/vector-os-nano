@@ -27,6 +27,14 @@
   - BaseProtocol satisfied (isinstance check passes)
   - _pd_interpolate pauses/resumes physics thread internally (MuJoCo thread-safety)
   - 17/17 tests passing (10 existing + 7 new HAL tests)
+- T7/T8 (Unified NavigateSkill): COMPLETE
+  - Created vector_os_nano/skills/navigate.py (hardware-agnostic, 220 lines)
+  - NavStackClient mode: context.services["nav"] when is_available=True
+  - Dead-reckoning fallback: room map + waypoint graph, any BaseProtocol
+  - go2/__init__.py updated: imports NavigateSkill from top-level skills/
+  - go2/navigate.py: thin DeprecationWarning re-export
+  - tests/unit/test_navigate_skill.py: 20 tests, all passing
+  - 0 regressions (92 navigate-adjacent tests pass, 34 pre-existing failures unchanged)
 
 ### Gamma -- DONE
 - T1 (Odometry + LaserScan types): COMPLETE
@@ -71,7 +79,7 @@ Files:
 | Agent | Model | Status | Assigned |
 |-------|-------|--------|----------|
 | Lead | opus | ACTIVE | ADR-003 authoring |
-| Alpha | sonnet | IDLE | Wave 1: T1 (BaseProtocol), T2 (Types) |
+| Alpha | sonnet | DONE | T7/T8 (Unified NavigateSkill): 20 tests, 0 regressions |
 | Beta | sonnet | DONE | NavStackClient: ROS2 nav stack wrapper (16 tests, 0 regressions) |
 | Gamma | sonnet | DONE | T5: Agent HAL integration tests (14 tests, 0 regressions) |
 | QA | -- | IDLE | Review after each wave |

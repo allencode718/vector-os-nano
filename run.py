@@ -771,7 +771,8 @@ def main() -> None:
             _run_web(agent, cfg)
         elif dashboard_mode:
             _run_dashboard(agent)
-        elif args.agent:
+        elif args.agent or go2_mode:
+            # Go2 mode always uses ToolAgent (CLI prompts assume robot arm)
             _run_agent_mode(agent, cfg, api_key, args)
         else:
             _run_cli(agent, perception, verbose=args.verbose)

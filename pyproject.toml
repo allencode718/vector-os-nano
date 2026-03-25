@@ -88,6 +88,9 @@ mcp = [
     "mcp>=1.0",
 ]
 
+# Go2 quadruped locomotion: Pinocchio kinematics + CasADi for MPC
+go2 = ["casadi>=3.6", "pin>=3.0"]
+
 all = [
     "vector-os-nano[perception,ik,tui,sim,web,mcp]",
 ]

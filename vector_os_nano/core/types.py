@@ -197,11 +197,13 @@ class SkillResult:
 
     Frozen to prevent post-execution mutation.
     result_data carries skill-specific output (e.g., grasp position).
+    diagnosis_code is a short machine-readable failure code (e.g. "no_base").
     """
 
     success: bool
     result_data: dict[str, Any] = field(default_factory=dict)
     error_message: str = ""
+    diagnosis_code: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {

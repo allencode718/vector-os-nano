@@ -240,3 +240,30 @@ vector> help / q                # Help / quit
 - Context-aware: knows robot mode, gripper state, visible objects
 - Task planning: decomposes to skill sequences
 - Post-execution summarization
+
+---
+
+## Go2 MuJoCo Integration (Milestone 1)
+
+| Task | Status | Agent |
+|------|--------|-------|
+| T1: WorldModel base fields + Agent base param | DONE | Gamma |
+| T2: MuJoCoGo2 lifecycle + PD posture | DONE | Alpha |
+| T3: MuJoCoGo2 MPC walk | DONE | Alpha |
+| T4: Go2 Skills (walk/turn/stance) | DONE | Beta |
+| T5: run.py --sim-go2 + ToolAgent | DONE | Gamma |
+| T6: Integration testing | DONE | Beta |
+| T7: Dependencies | DONE | Gamma |
+
+### What works
+- `python run.py --sim-go2` launches Go2 in MuJoCo with convex MPC locomotion
+- "往前走" / "walk forward" via ToolAgent → Go2 walks using MPC controller
+- "左转" / "turn left" → Go2 turns in place
+- "坐下" / "sit" → Go2 sits down via PD interpolation
+- Convex MPC (MIT Cheetah 3 paper) for stable, velocity-tracking trot gait
+- 45+ unit tests, 3+ integration tests passing
+
+### Dependencies
+- go2-convex-mpc (editable install from ~/Desktop/go2-convex-mpc)
+- pinocchio 3.9.0 (pip: pin)
+- casadi 3.7.2 (pip)

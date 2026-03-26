@@ -1,11 +1,15 @@
-"""ExploreSkill — autonomous house exploration with spatial memory.
+"""Exploration + Spatial Memory skills — learn the environment by moving through it.
 
-Systematically visits rooms, records observations, builds semantic map.
-Uses NavStackClient for movement and SpatialMemory for persistence.
+Instead of hardcoded room coordinates, the agent:
+  1. Explores by navigating to different directions/distances
+  2. Remembers locations the user names ("记住这里叫厨房")
+  3. Navigates to remembered locations ("去厨房")
+  4. Reports its actual position from the nav stack odometry
 """
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any
 
@@ -14,222 +18,219 @@ from vector_os_nano.core.types import SkillResult
 
 logger = logging.getLogger(__name__)
 
-# Default exploration waypoints (matching go2_room.xml house layout)
-_DEFAULT_EXPLORATION = [
-    (10.0, 5.0, "hallway", "corridor"),
-    (3.0, 2.5, "living_room", "room"),
-    (3.0, 7.5, "dining_room", "room"),
-    (17.0, 2.5, "kitchen", "room"),
-    (17.0, 7.5, "study", "room"),
-    (3.5, 12.0, "master_bedroom", "room"),
-    (16.0, 12.0, "guest_bedroom", "room"),
-    (8.5, 12.0, "bathroom", "room"),
-]
+
+def _get_memory(context: SkillContext) -> Any:
+    from vector_os_nano.core.spatial_memory import SpatialMemory
+    mem = context.services.get("spatial_memory")
+    if mem is None:
+        mem = SpatialMemory()
+        context.services["spatial_memory"] = mem
+    return mem
+
+
+def _get_position(context: SkillContext) -> tuple[float, float] | None:
+    """Get actual robot position from base or nav client."""
+    if context.base is not None:
+        try:
+            pos = context.base.get_position()
+            return (pos[0], pos[1])
+        except Exception:
+            pass
+    nav = context.services.get("nav")
+    if nav is not None:
+        odom = nav.get_state_estimation()
+        if odom:
+            return (odom.x, odom.y)
+    return None
+
+
+def _navigate_and_wait(context: SkillContext, x: float, y: float, timeout: float = 30.0) -> bool:
+    """Navigate to (x, y) and verify arrival by checking position."""
+    nav = context.services.get("nav")
+    if nav is None or not nav.is_available:
+        return False
+
+    nav.navigate_to(x, y, timeout=timeout)
+
+    # Check actual position — did we get close?
+    pos = _get_position(context)
+    if pos is None:
+        return False
+    dist = math.sqrt((pos[0] - x)**2 + (pos[1] - y)**2)
+    return dist < 3.0  # within 3m = close enough
 
 
 @skill(
-    aliases=["explore", "探索", "逛逛", "看看房子", "explore house", "look around"],
+    aliases=["explore", "探索", "逛逛", "看看", "explore house", "look around"],
     direct=False,
 )
 class ExploreSkill:
-    """Autonomously explore the house, visiting each room and recording observations."""
+    """Explore the environment by moving in different directions."""
 
     name: str = "explore"
     description: str = (
-        "Explore the house autonomously. Visits unvisited rooms, records what is found. "
-        "Reports back a summary of discovered rooms and objects."
+        "Explore the environment. Navigate to a direction and distance to discover new areas. "
+        "Use remember_location to save interesting spots."
     )
     parameters: dict = {
-        "strategy": {
+        "direction": {
             "type": "string",
             "required": False,
-            "default": "systematic",
-            "enum": ["systematic", "nearest"],
-            "description": "Exploration strategy: systematic (room by room) or nearest (closest unvisited)",
+            "default": "forward",
+            "enum": ["forward", "left", "right", "back"],
+            "description": "Direction to explore relative to current heading",
+        },
+        "distance": {
+            "type": "number",
+            "required": False,
+            "default": 5.0,
+            "description": "How far to explore in meters",
         },
     }
     preconditions: list[str] = []
     postconditions: list[str] = []
-    effects: dict = {"exploration": "updated"}
-    failure_modes: list[str] = ["no_base", "navigation_failed"]
+    effects: dict = {"position": "changed"}
+    failure_modes: list[str] = ["no_base", "no_nav", "navigation_failed"]
 
     def execute(self, params: dict, context: SkillContext) -> SkillResult:
-        if context.base is None:
-            return SkillResult(success=False, diagnosis_code="no_base")
+        pos = _get_position(context)
+        if pos is None:
+            return SkillResult(success=False, diagnosis_code="no_base",
+                             error_message="Cannot get robot position")
 
-        memory = _get_or_create_memory(context)
-        strategy = params.get("strategy", "systematic")
-
-        # Initialize exploration waypoints if not set
-        if not memory.get_all_locations():
-            for x, y, name, cat in _DEFAULT_EXPLORATION:
-                memory.add_location(name, x, y, category=cat)
-            memory.set_exploration_waypoints(
-                [(x, y, name) for x, y, name, _ in _DEFAULT_EXPLORATION]
-            )
-
-        # Get nav client
         nav = context.services.get("nav")
-        visited = []
-        failed = []
+        if nav is None or not nav.is_available:
+            return SkillResult(success=False, diagnosis_code="no_nav",
+                             error_message="Navigation stack not available")
 
-        # Visit unvisited rooms
-        while True:
-            if strategy == "nearest":
-                target = _nearest_unvisited(memory, context.base)
-            else:
-                target = memory.get_next_exploration_target()
+        direction = params.get("direction", "forward")
+        distance = float(params.get("distance", 5.0))
 
-            if target is None:
-                break  # all explored
+        # Get current heading
+        heading = 0.0
+        if context.base:
+            try:
+                heading = context.base.get_heading()
+            except Exception:
+                pass
 
-            tx, ty, tname = target
-            logger.info("[EXPLORE] Navigating to %s (%.1f, %.1f)", tname, tx, ty)
+        # Calculate target based on direction
+        angle_map = {
+            "forward": 0, "left": math.pi/2,
+            "right": -math.pi/2, "back": math.pi,
+        }
+        angle = heading + angle_map.get(direction, 0)
+        tx = pos[0] + distance * math.cos(angle)
+        ty = pos[1] + distance * math.sin(angle)
 
-            # Navigate
-            ok = False
-            if nav and nav.is_available:
-                ok = nav.navigate_to(tx, ty, timeout=30.0)
-            else:
-                # Dead-reckoning fallback
-                ok = _dead_reckoning_to(context.base, tx, ty)
+        logger.info("[EXPLORE] From (%.1f, %.1f) heading %s %.1fm to (%.1f, %.1f)",
+                   pos[0], pos[1], direction, distance, tx, ty)
 
-            if ok:
-                pos = context.base.get_position()
-                memory.visit(tname, pos[0], pos[1])
-                visited.append(tname)
-                logger.info("[EXPLORE] Visited %s", tname)
-            else:
-                memory.visit(tname, tx, ty)  # mark as visited even if imprecise
-                failed.append(tname)
-                logger.warning("[EXPLORE] Failed to reach %s", tname)
+        ok = _navigate_and_wait(context, tx, ty, timeout=30.0)
+        new_pos = _get_position(context)
+
+        # Record visit
+        memory = _get_memory(context)
+        if new_pos:
+            loc_name = memory.current_location_name(new_pos[0], new_pos[1])
+            if loc_name:
+                memory.visit(loc_name, new_pos[0], new_pos[1])
 
         return SkillResult(
-            success=True,
+            success=ok,
             result_data={
-                "visited": visited,
-                "failed": failed,
-                "total_known": len(memory.get_all_locations()),
-                "total_visited": len(memory.get_visited_locations()),
-                "summary": memory.summary_for_llm(),
+                "start": [round(pos[0], 1), round(pos[1], 1)],
+                "target": [round(tx, 1), round(ty, 1)],
+                "actual": [round(new_pos[0], 1), round(new_pos[1], 1)] if new_pos else None,
+                "direction": direction,
+                "distance": distance,
             },
         )
 
 
 @skill(
-    aliases=["remember", "记住", "mark", "标记"],
+    aliases=["remember", "记住", "mark", "标记", "save location", "保存位置"],
     direct=False,
 )
 class RememberLocationSkill:
-    """Remember the current location with a custom name."""
+    """Save the current position with a name for future navigation."""
 
     name: str = "remember_location"
-    description: str = "Save the current location with a name for future navigation."
+    description: str = (
+        "Save the robot's current position with a custom name. "
+        "Later you can navigate back with navigate(room=name). "
+        "Example: remember_location(name='kitchen') saves current spot as 'kitchen'."
+    )
     parameters: dict = {
         "name": {
             "type": "string",
             "required": True,
-            "description": "Name for this location (e.g., 'charging_station', 'my_spot')",
+            "description": "Name for this location (e.g., 'kitchen', 'charging_station', '厨房')",
         },
     }
     preconditions: list[str] = []
     postconditions: list[str] = []
     effects: dict = {"memory": "updated"}
-    failure_modes: list[str] = ["no_base"]
+    failure_modes: list[str] = ["no_position"]
 
     def execute(self, params: dict, context: SkillContext) -> SkillResult:
-        if context.base is None:
-            return SkillResult(success=False, diagnosis_code="no_base")
+        pos = _get_position(context)
+        if pos is None:
+            return SkillResult(success=False, diagnosis_code="no_position")
 
-        memory = _get_or_create_memory(context)
-        pos = context.base.get_position()
         name = params.get("name", "unnamed")
-
-        memory.add_location(name, pos[0], pos[1], category="landmark",
-                           tags=["user_defined"])
+        memory = _get_memory(context)
+        memory.add_location(name, pos[0], pos[1], category="landmark", tags=["user_defined"])
         memory.visit(name, pos[0], pos[1])
+
+        # Also add Chinese alias if applicable
+        from vector_os_nano.skills.navigate import _ROOM_ALIASES, _ROOM_CENTERS
+        _ROOM_ALIASES[name.lower()] = name
+        _ROOM_CENTERS[name] = (pos[0], pos[1])
 
         return SkillResult(
             success=True,
             result_data={
-                "location": name,
+                "saved": name,
                 "position": [round(pos[0], 1), round(pos[1], 1)],
+                "total_locations": len(memory.get_all_locations()),
             },
         )
 
 
 @skill(
-    aliases=["where am i", "在哪", "我在哪", "位置", "location"],
+    aliases=["where am i", "where", "在哪", "我在哪", "位置", "location", "status"],
     direct=True,
 )
 class WhereAmISkill:
-    """Report the robot's current location using spatial memory."""
+    """Report the robot's current position and nearest known location."""
 
     name: str = "where_am_i"
-    description: str = "Report which room or location the robot is currently in."
+    description: str = "Report the robot's current position and which known location it is near."
     parameters: dict = {}
     preconditions: list[str] = []
     postconditions: list[str] = []
     effects: dict = {}
-    failure_modes: list[str] = ["no_base"]
+    failure_modes: list[str] = ["no_position"]
 
     def execute(self, params: dict, context: SkillContext) -> SkillResult:
-        if context.base is None:
-            return SkillResult(success=False, diagnosis_code="no_base")
+        pos = _get_position(context)
+        if pos is None:
+            return SkillResult(success=False, diagnosis_code="no_position")
 
-        memory = _get_or_create_memory(context)
-        pos = context.base.get_position()
+        memory = _get_memory(context)
         loc_name = memory.current_location_name(pos[0], pos[1])
+        nearest = memory.nearest_location(pos[0], pos[1])
+        visited = memory.get_visited_locations()
 
         return SkillResult(
             success=True,
             result_data={
-                "current_location": loc_name or "unknown",
                 "position": [round(pos[0], 1), round(pos[1], 1)],
-                "memory_summary": memory.summary_for_llm(),
+                "current_location": loc_name,
+                "nearest_known": nearest.name if nearest else None,
+                "visited_count": len(visited),
+                "known_locations": [l.name for l in memory.get_all_locations()],
+                "memory": memory.summary_for_llm(),
             },
         )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _get_or_create_memory(context: SkillContext) -> Any:
-    """Get SpatialMemory from context services, or create one."""
-    from vector_os_nano.core.spatial_memory import SpatialMemory
-    memory = context.services.get("spatial_memory")
-    if memory is None:
-        memory = SpatialMemory()
-        context.services["spatial_memory"] = memory
-    return memory
-
-
-def _nearest_unvisited(memory: Any, base: Any) -> tuple[float, float, str] | None:
-    """Find nearest unvisited location."""
-    import math
-    pos = base.get_position()
-    unvisited = memory.get_unvisited_locations()
-    if not unvisited:
-        return None
-    best = min(unvisited, key=lambda l: math.sqrt((l.x - pos[0])**2 + (l.y - pos[1])**2))
-    return (best.x, best.y, best.name)
-
-
-def _dead_reckoning_to(base: Any, tx: float, ty: float) -> bool:
-    """Simple turn-and-walk fallback."""
-    import math
-    pos = base.get_position()
-    heading = base.get_heading()
-    dx, dy = tx - pos[0], ty - pos[1]
-    dist = math.sqrt(dx**2 + dy**2)
-    if dist < 0.5:
-        return True
-    target_angle = math.atan2(dy, dx)
-    turn = target_angle - heading
-    while turn > math.pi: turn -= 2 * math.pi
-    while turn < -math.pi: turn += 2 * math.pi
-    if abs(turn) > 0.1:
-        base.walk(0, 0, 0.8 if turn > 0 else -0.8, abs(turn) / 0.8)
-    base.walk(0.4, 0, 0, dist / 0.4)
-    return True

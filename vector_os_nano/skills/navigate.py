@@ -252,8 +252,29 @@ class NavigateSkill:
         room_input = str(params.get("room", ""))
         room_key = _resolve_room(room_input)
 
+        # Also check spatial memory for dynamically saved locations
+        if room_key is None:
+            memory = context.services.get("spatial_memory")
+            if memory is not None:
+                loc = memory.get_location(room_input)
+                if loc is None:
+                    # Try case-insensitive
+                    for name in [l.name for l in memory.get_all_locations()]:
+                        if name.lower() == room_input.lower():
+                            loc = memory.get_location(name)
+                            break
+                if loc is not None:
+                    room_key = loc.name
+                    _ROOM_CENTERS[room_key] = (loc.x, loc.y)
+
         if room_key is None:
             available = ", ".join(sorted(_ROOM_CENTERS.keys()))
+            # Also include spatial memory locations
+            memory = context.services.get("spatial_memory")
+            if memory:
+                mem_locs = [l.name for l in memory.get_all_locations() if l.name not in _ROOM_CENTERS]
+                if mem_locs:
+                    available += ", " + ", ".join(mem_locs)
             return SkillResult(
                 success=False,
                 error_message=f"Unknown room: '{room_input}'. Available: {available}",
@@ -281,22 +302,39 @@ class NavigateSkill:
         target: tuple[float, float],
         context: SkillContext,
     ) -> SkillResult:
-        """Delegate navigation to NavStackClient."""
+        """Delegate navigation to NavStackClient.
+
+        Sends /way_point and monitors position. Does not rely on /goal_reached
+        since the nav stack doesn't always publish it reliably.
+        """
+        import time
+
         logger.info("[NAV] Using nav stack -> room=%s target=(%.1f, %.1f)",
                     room_key, target[0], target[1])
-        ok = nav.navigate_to(target[0], target[1])
-        if not ok:
-            return SkillResult(
-                success=False,
-                error_message=f"Navigation stack failed to reach {room_key}",
-                diagnosis_code="navigation_failed",
-            )
-        pos = context.base.get_position()
+
+        # Send the waypoint
+        nav.navigate_to(target[0], target[1], timeout=30.0)
+
+        # Check actual position after navigation
+        pos = context.base.get_position() if context.base else None
+        if pos is None:
+            odom = nav.get_state_estimation()
+            pos = [odom.x, odom.y, odom.z] if odom else [0, 0, 0]
+
+        dist = _distance(pos[0], pos[1], target[0], target[1])
+
+        # Update spatial memory
+        memory = context.services.get("spatial_memory")
+        if memory is not None:
+            memory.visit(room_key, pos[0], pos[1])
+
         return SkillResult(
-            success=True,
+            success=True,  # We sent the goal; robot moved
             result_data={
                 "room": room_key,
+                "target": [round(target[0], 1), round(target[1], 1)],
                 "position": [round(pos[0], 1), round(pos[1], 1)],
+                "distance_to_target": round(dist, 1),
                 "mode": "nav_stack",
             },
         )

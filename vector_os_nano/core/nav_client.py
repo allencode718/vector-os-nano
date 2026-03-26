@@ -142,11 +142,8 @@ class NavStackClient:
         wait_timeout = timeout if timeout is not None else self._timeout
         start = time.time()
         while not self._goal_reached and (time.time() - start) < wait_timeout:
-            executor = getattr(self._node, "executor", None)
-            if executor is not None:
-                executor.spin_once(timeout_sec=0.1)
-            else:
-                time.sleep(0.05)
+            # Just sleep — callbacks are handled by the executor in the caller's spin thread
+            time.sleep(0.1)
 
         if self._goal_reached:
             logger.info("NavStackClient: goal reached")

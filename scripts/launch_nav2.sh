@@ -84,12 +84,8 @@ NAV2_PID=$!
 if [ -n "$RVIZ" ]; then
     sleep 3
     echo "Starting RViz..."
-    RVIZ_CFG="$NAV_WS/src/vector_go2_navigation/config/nav2.rviz"
-    if [ -f "$RVIZ_CFG" ]; then
-        rviz2 -d "$RVIZ_CFG" &
-    else
-        rviz2 &
-    fi
+    RVIZ_CFG="$REPO_DIR/config/nav2_go2.rviz"
+    rviz2 -d "$RVIZ_CFG" &
 fi
 
 echo ""

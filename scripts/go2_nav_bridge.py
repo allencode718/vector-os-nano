@@ -66,10 +66,12 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from nav_msgs.msg import Odometry as OdometryMsg
-from sensor_msgs.msg import LaserScan as LaserScanMsg
+from sensor_msgs.msg import LaserScan as LaserScanMsg, PointCloud2, PointField
 from geometry_msgs.msg import Twist, TransformStamped
 from tf2_ros import TransformBroadcaster
+from std_msgs.msg import Header
 import numpy as np
+import struct
 
 # ---------------------------------------------------------------------------
 # MuJoCoGo2 import
@@ -104,6 +106,7 @@ class Go2NavBridge(Node):
         # Publishers
         self._odom_pub = self.create_publisher(OdometryMsg, "/odom", sensor_qos)
         self._scan_pub = self.create_publisher(LaserScanMsg, "/scan", reliable_qos)
+        self._pc_pub = self.create_publisher(PointCloud2, "/registered_scan", reliable_qos)
         self._tf_broadcaster = TransformBroadcaster(self)
 
         # Subscribe to all cmd_vel variants — Nav2 Jazzy pipeline:
@@ -113,11 +116,14 @@ class Go2NavBridge(Node):
         self._cmd_count = 0
 
         # Timers
-        self.create_timer(1.0 / 50.0, self._publish_odom)   # 50 Hz
-        self.create_timer(1.0 / 10.0, self._publish_scan)   # 10 Hz
-        self.create_timer(1.0, self._safety_check)           # 1 Hz
+        self.create_timer(1.0 / 50.0, self._publish_odom)       # 50 Hz
+        self.create_timer(1.0 / 10.0, self._publish_scan)       # 10 Hz
+        self.create_timer(1.0 / 10.0, self._publish_pointcloud) # 10 Hz
+        self.create_timer(1.0, self._safety_check)               # 1 Hz
 
-        self.get_logger().info("Go2NavBridge started — publishing /odom, /scan, TF")
+        self.get_logger().info(
+            "Go2NavBridge started — publishing /odom, /scan, /registered_scan, TF"
+        )
 
     def _make_cmd_cb(self, topic: str):
         def cb(msg: Twist) -> None:
@@ -186,6 +192,41 @@ class Go2NavBridge(Node):
         msg.time_increment = 0.0
         msg.scan_time = 0.1
         self._scan_pub.publish(msg)
+
+    def _publish_pointcloud(self) -> None:
+        """Publish 3D point cloud from MuJoCo multi-ring lidar."""
+        points = self._go2.get_3d_pointcloud()
+        if not points:
+            return
+
+        now = self.get_clock().now().to_msg()
+
+        # Build PointCloud2 message (XYZI format)
+        fields = [
+            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name="intensity", offset=12, datatype=PointField.FLOAT32, count=1),
+        ]
+
+        point_step = 16  # 4 floats × 4 bytes
+        data = bytearray()
+        for x, y, z, intensity in points:
+            data.extend(struct.pack("ffff", x, y, z, intensity))
+
+        msg = PointCloud2()
+        msg.header.stamp = now
+        msg.header.frame_id = "map"  # points are in world frame
+        msg.height = 1
+        msg.width = len(points)
+        msg.fields = fields
+        msg.is_bigendian = False
+        msg.point_step = point_step
+        msg.row_step = point_step * len(points)
+        msg.data = bytes(data)
+        msg.is_dense = True
+
+        self._pc_pub.publish(msg)
 
     def _safety_check(self) -> None:
         # Stop if no cmd_vel for 2 seconds

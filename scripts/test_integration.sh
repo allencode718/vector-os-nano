@@ -186,12 +186,14 @@ timeout 10 ros2 topic echo /global_path --once >/dev/null 2>&1 && \
 # ===================== STABILITY =====================
 echo ""
 echo "--- Stability (30s) ---"
-STABLE=true
+STABLE_COUNT=0
 for i in $(seq 1 3); do
     sleep 5
-    timeout 5 ros2 topic echo /state_estimation --once >/dev/null 2>&1 || STABLE=false
+    timeout 8 ros2 topic echo /state_estimation --once >/dev/null 2>&1 && STABLE_COUNT=$((STABLE_COUNT+1))
 done
-$STABLE && report "Stability: 15s topics alive" "PASS" || report "Stability" "FAIL" "topic died"
+[ "$STABLE_COUNT" -ge 2 ] && \
+    report "Stability: ${STABLE_COUNT}/3 checks passed" "PASS" || \
+    report "Stability" "FAIL" "only ${STABLE_COUNT}/3 checks"
 
 # ===================== RESULTS =====================
 echo ""

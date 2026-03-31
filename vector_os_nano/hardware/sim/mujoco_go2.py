@@ -787,21 +787,36 @@ class MuJoCoGo2:
         from vector_os_nano.core.types import LaserScan  # noqa: PLC0415
         mj = _get_mujoco()
 
-        pos = self._mj.data.qpos[0:3].copy().astype(np.float64)
-        lidar_z = float(pos[2]) + 0.05
-        pos_lidar = np.array([pos[0], pos[1], lidar_z], dtype=np.float64)
+        # Sensor mounting: 0.2m forward, 0.1m up from base center
+        # (matches unitree_go2.yaml sensorOffset and bridge TF)
+        _LIDAR_OFFSET_X = 0.2
+        _LIDAR_OFFSET_Z = 0.1
 
+        pos = self._mj.data.qpos[0:3].copy().astype(np.float64)
         heading = self.get_heading()
+        cos_h = math.cos(heading)
+        sin_h = math.sin(heading)
+
+        # Lidar position in world frame = base + rotated offset
+        pos_lidar = np.array([
+            float(pos[0]) + cos_h * _LIDAR_OFFSET_X,
+            float(pos[1]) + sin_h * _LIDAR_OFFSET_X,
+            float(pos[2]) + _LIDAR_OFFSET_Z,
+        ], dtype=np.float64)
+
         robot_body_id = self._mj.base_bid
 
-        # MID360 mounting: 30° forward tilt (pitch DOWN), matching real hardware.
+        # Scan beam tilt: 30° downward from sensor horizontal plane
+        # (sensor frame itself is NOT tilted — only the beams are)
         tilt_rad = math.radians(-30.0)
         cos_tilt = math.cos(tilt_rad)
         sin_tilt = math.sin(tilt_rad)
 
-        # Livox MID360-like pattern: 26 elevation rings (-25° to +25°), 360 azimuth
+        # Livox MID360 FOV: -7° to +52° (asymmetric, 59° range)
+        # With 30° downward tilt → world frame: -37° to +22°
+        # This gives both ground hits (below horizontal) and wall hits (above)
         n_azimuth = 360
-        elevations = list(range(-25, 26, 2))
+        elevations = list(range(-7, 53, 2))  # -7° to +52° in 2° steps = 30 rings
         mid_ring_ranges: list[float] = []
         points_3d: list[tuple[float, float, float, float]] = []
 

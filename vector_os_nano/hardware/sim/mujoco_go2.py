@@ -778,7 +778,12 @@ class MuJoCoGo2:
         )
 
     def _update_lidar(self) -> None:
-        """Cast rays in multiple elevation rings — Livox MID360-like 3D lidar."""
+        """Cast rays in multiple elevation rings — Livox MID360-like 3D lidar.
+
+        The MID360 is mounted tilted 30 degrees forward (pitch down).
+        This means the lidar's "horizontal" plane is actually 30° below
+        horizontal, so it sees the ground in front and walls ahead.
+        """
         from vector_os_nano.core.types import LaserScan  # noqa: PLC0415
         mj = _get_mujoco()
 
@@ -789,10 +794,14 @@ class MuJoCoGo2:
         heading = self.get_heading()
         robot_body_id = self._mj.base_bid
 
-        # Livox MID360-like pattern: 30 elevation rings (-25° to +25°), ~200 azimuth
-        # Denser near horizontal (1° steps), sparser at edges (2° steps)
+        # MID360 mounting: 30° forward tilt (pitch down)
+        tilt_rad = math.radians(30.0)
+        cos_tilt = math.cos(tilt_rad)
+        sin_tilt = math.sin(tilt_rad)
+
+        # Livox MID360-like pattern: 26 elevation rings (-25° to +25°), 200 azimuth
         n_azimuth = 200
-        elevations = list(range(-25, 26, 2))  # -25 to +25 in 2° steps = 26 rings
+        elevations = list(range(-25, 26, 2))
         mid_ring_ranges: list[float] = []
         points_3d: list[tuple[float, float, float, float]] = []
 
@@ -800,13 +809,33 @@ class MuJoCoGo2:
             elev_rad = math.radians(elev_deg)
             cos_elev = math.cos(elev_rad)
             sin_elev = math.sin(elev_rad)
-            azimuth_step = 360.0 / n_azimuth  # degrees per ray
+            azimuth_step = 360.0 / n_azimuth
             for i in range(n_azimuth):
                 azimuth = heading + math.radians(i * azimuth_step - 180)
+
+                # Direction in lidar frame (before tilt)
+                dx_lidar = cos_elev * math.cos(azimuth)
+                dy_lidar = cos_elev * math.sin(azimuth)
+                dz_lidar = sin_elev
+
+                # Apply 30° forward tilt (rotate around Y axis in body frame)
+                # In world frame: tilt rotates the forward (heading) component downward
+                cos_az = math.cos(azimuth)
+                sin_az = math.sin(azimuth)
+
+                # Decompose into forward (along heading) and lateral components
+                d_fwd = dx_lidar * cos_az + dy_lidar * sin_az  # forward component
+                d_lat = -dx_lidar * sin_az + dy_lidar * cos_az  # lateral component
+
+                # Tilt: rotate forward+vertical plane by -30° (pitch down)
+                d_fwd_tilted = d_fwd * cos_tilt - dz_lidar * sin_tilt
+                dz_tilted = d_fwd * sin_tilt + dz_lidar * cos_tilt
+
+                # Back to world frame
                 direction = np.array([
-                    cos_elev * math.cos(azimuth),
-                    cos_elev * math.sin(azimuth),
-                    sin_elev,
+                    d_fwd_tilted * cos_az - d_lat * sin_az,
+                    d_fwd_tilted * sin_az + d_lat * cos_az,
+                    dz_tilted,
                 ], dtype=np.float64)
                 geom_id = np.zeros(1, dtype=np.int32)
                 dist = mj.mj_ray(

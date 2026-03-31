@@ -116,8 +116,11 @@ class Go2VNavBridge(Node):
         # Publish static TF: sensor → base_link (sensor mounting offset)
         self._publish_static_tf()
 
-        # Subscribe to /cmd_vel (TwistStamped from nav stack)
-        # Also accept plain Twist for manual control
+        # Subscribe to all velocity sources in the nav stack pipeline:
+        #   /navigation_cmd_vel — localPlanner direct output (TwistStamped)
+        #   /cmd_vel — pathFollower / cmd_vel_mux output (TwistStamped)
+        #   /cmd_vel_nav — manual control (Twist)
+        self.create_subscription(TwistStamped, "/navigation_cmd_vel", self._cmd_vel_stamped_cb, 10)
         self.create_subscription(TwistStamped, "/cmd_vel", self._cmd_vel_stamped_cb, 10)
         self.create_subscription(Twist, "/cmd_vel_nav", self._cmd_vel_cb, 10)
         self._cmd_count = 0

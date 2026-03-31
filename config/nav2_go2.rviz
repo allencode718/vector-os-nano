@@ -59,7 +59,7 @@ Visualization Manager:
       Style: Points
       Alpha: 1.0
 
-    # 3D Point Cloud (multi-ring lidar)
+    # 3D Point Cloud (multi-ring lidar — colored by height)
     - Class: rviz_default_plugins/PointCloud2
       Name: PointCloud
       Enabled: true
@@ -69,10 +69,24 @@ Visualization Manager:
         Reliability Policy: Reliable
       Size (Pixels): 3
       Style: Points
-      Color Transformer: FlatColor
-      Color: 0; 200; 255
-      Alpha: 0.8
-      Decay Time: 2.0
+      Color Transformer: AxisColor
+      Axis: Z
+      Alpha: 0.9
+      Decay Time: 5.0
+
+    # Terrain map (from terrain_analysis — height-coded obstacles)
+    - Class: rviz_default_plugins/PointCloud2
+      Name: TerrainMap
+      Enabled: true
+      Topic:
+        Value: /terrain_map
+        Depth: 5
+        Reliability Policy: Reliable
+      Size (Pixels): 5
+      Style: Squares
+      Color Transformer: Intensity
+      Alpha: 0.7
+      Decay Time: 0.5
 
     # Robot odometry trail
     - Class: rviz_default_plugins/Odometry
@@ -156,13 +170,22 @@ Visualization Manager:
       Topic: /goal_pose
   Views:
     Current:
-      Class: rviz_default_plugins/TopDownOrtho
-      Name: TopDown
-      X: 10.0
-      Y: 7.0
-      Scale: 40
-      Angle: 0
-    Saved: ~
+      Class: rviz_default_plugins/Orbit
+      Name: Orbit
+      Distance: 15.0
+      Yaw: 3.14
+      Pitch: 0.7
+      Focal Point:
+        X: 10.0
+        Y: 7.0
+        Z: 0.0
+    Saved:
+      - Class: rviz_default_plugins/TopDownOrtho
+        Name: TopDown
+        X: 10.0
+        Y: 7.0
+        Scale: 40
+        Angle: 0
 Window Geometry:
   Width: 1400
   Height: 900

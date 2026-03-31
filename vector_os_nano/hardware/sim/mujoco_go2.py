@@ -828,29 +828,26 @@ class MuJoCoGo2:
             for i in range(n_azimuth):
                 azimuth = heading + math.radians(i * azimuth_step - 180)
 
-                # Direction in lidar frame (before tilt)
-                dx_lidar = cos_elev * math.cos(azimuth)
-                dy_lidar = cos_elev * math.sin(azimuth)
-                dz_lidar = sin_elev
+                # Ray direction in world frame (no tilt yet)
+                dx_w = cos_elev * math.cos(azimuth)
+                dy_w = cos_elev * math.sin(azimuth)
+                dz_w = sin_elev
 
-                # Apply 30° forward tilt (rotate around Y axis in body frame)
-                # In world frame: tilt rotates the forward (heading) component downward
-                cos_az = math.cos(azimuth)
-                sin_az = math.sin(azimuth)
+                # World → body frame (rotate by -heading around Z)
+                dx_b = dx_w * cos_h + dy_w * sin_h    # forward
+                dy_b = -dx_w * sin_h + dy_w * cos_h   # left
+                dz_b = dz_w                            # up
 
-                # Decompose into forward (along heading) and lateral components
-                d_fwd = dx_lidar * cos_az + dy_lidar * sin_az  # forward component
-                d_lat = -dx_lidar * sin_az + dy_lidar * cos_az  # lateral component
+                # Apply pitch tilt in body frame (rotate around body Y axis)
+                # Forward points down, backward points up
+                dx_bt = dx_b * cos_tilt - dz_b * sin_tilt
+                dz_bt = dx_b * sin_tilt + dz_b * cos_tilt
 
-                # Tilt: rotate forward+vertical plane by -30° (pitch down)
-                d_fwd_tilted = d_fwd * cos_tilt - dz_lidar * sin_tilt
-                dz_tilted = d_fwd * sin_tilt + dz_lidar * cos_tilt
-
-                # Back to world frame
+                # Body → world frame (rotate by +heading)
                 direction = np.array([
-                    d_fwd_tilted * cos_az - d_lat * sin_az,
-                    d_fwd_tilted * sin_az + d_lat * cos_az,
-                    dz_tilted,
+                    dx_bt * cos_h - dy_b * sin_h,
+                    dx_bt * sin_h + dy_b * cos_h,
+                    dz_bt,
                 ], dtype=np.float64)
                 geom_id = np.zeros(1, dtype=np.int32)
                 dist = mj.mj_ray(

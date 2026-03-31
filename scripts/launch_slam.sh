@@ -43,14 +43,24 @@ if [ -f "$NAV_WS/install/setup.bash" ]; then
     source "$NAV_WS/install/setup.bash"
 fi
 
+set -m  # job control for process group cleanup
+
+PIDS=()
 cleanup() {
     echo ""
-    echo "Stopping all..."
-    kill $BRIDGE_PID $SLAM_PID $NAV2_PID $RVIZ_PID 2>/dev/null
-    wait $BRIDGE_PID $SLAM_PID $NAV2_PID $RVIZ_PID 2>/dev/null
+    echo "Stopping all processes..."
+    for p in "${PIDS[@]}"; do
+        kill -- -"$p" 2>/dev/null || kill "$p" 2>/dev/null
+    done
+    sleep 1
+    for proc in go2_nav_bridge slam_toolbox nav2 controller_server planner_server bt_navigator; do
+        pkill -9 -f "$proc" 2>/dev/null || true
+    done
+    rm -f /dev/shm/fastrtps_* 2>/dev/null
+    wait 2>/dev/null
     echo "Done."
 }
-trap cleanup EXIT INT
+trap cleanup EXIT INT TERM
 
 SLAM_PARAMS="$NAV_WS/src/vector_go2_navigation/config/slam_params.yaml"
 NAV2_PARAMS="$NAV_WS/src/vector_go2_navigation/config/nav2_params.yaml"
@@ -68,7 +78,7 @@ echo "======================================"
 # 1. Bridge
 echo "[1/4] Starting Go2 Nav Bridge..."
 python3 "$SCRIPT_DIR/go2_nav_bridge.py" $NO_GUI &
-BRIDGE_PID=$!
+PIDS+=($!)
 sleep 6
 
 # 2. SLAM Toolbox
@@ -76,7 +86,7 @@ echo "[2/4] Starting SLAM Toolbox..."
 ros2 launch slam_toolbox online_async_launch.py \
     slam_params_file:="$SLAM_PARAMS" \
     use_sim_time:=false &
-SLAM_PID=$!
+PIDS+=($!)
 sleep 3
 
 # 3. Nav2 (without map_server and AMCL — SLAM provides the map + TF)
@@ -85,13 +95,13 @@ ros2 launch nav2_bringup navigation_launch.py \
     params_file:="$NAV2_PARAMS" \
     use_sim_time:=false \
     autostart:=true &
-NAV2_PID=$!
+PIDS+=($!)
 sleep 2
 
 # 4. RViz
 echo "[4/4] Starting RViz..."
 rviz2 -d "$RVIZ_CFG" &
-RVIZ_PID=$!
+PIDS+=($!)
 
 echo ""
 echo "Ready! The map is empty — Go2 needs to move to build it."
@@ -102,4 +112,4 @@ echo "                     \"{pose: {header: {frame_id: 'map'}, pose: {position:
 echo ""
 echo "Press Ctrl+C to stop all."
 
-wait $BRIDGE_PID
+wait ${PIDS[0]}

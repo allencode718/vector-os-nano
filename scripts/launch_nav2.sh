@@ -18,6 +18,7 @@
 #     --feedback
 
 set -e
+set -m  # job control for process group cleanup
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
@@ -48,6 +49,23 @@ if [ -f "$NAV_WS/install/setup.bash" ]; then
     source "$NAV_WS/install/setup.bash"
 fi
 
+PIDS=()
+cleanup() {
+    echo ""
+    echo "Stopping all processes..."
+    for p in "${PIDS[@]}"; do
+        kill -- -"$p" 2>/dev/null || kill "$p" 2>/dev/null
+    done
+    sleep 1
+    for proc in go2_nav_bridge nav2 amcl controller_server planner_server bt_navigator; do
+        pkill -9 -f "$proc" 2>/dev/null || true
+    done
+    rm -f /dev/shm/fastrtps_* 2>/dev/null
+    wait 2>/dev/null
+    echo "Done."
+}
+trap cleanup EXIT INT TERM
+
 echo "======================================"
 echo "  Go2 Nav2 Navigation"
 echo "======================================"
@@ -59,7 +77,7 @@ echo "======================================"
 # Terminal 1: Go2 bridge
 echo "[1/2] Starting Go2 Nav Bridge..."
 python3 "$SCRIPT_DIR/go2_nav_bridge.py" $NO_GUI $SINUSOIDAL &
-BRIDGE_PID=$!
+PIDS+=($!)
 sleep 6  # wait for MuJoCo to load + stand
 
 # Terminal 2: Nav2 AMCL stack
@@ -69,7 +87,6 @@ NAV2_PARAMS="$NAV_WS/src/vector_go2_navigation/config/nav2_params.yaml"
 
 if [ ! -f "$MAP_FILE" ]; then
     echo "ERROR: Map file not found: $MAP_FILE"
-    kill $BRIDGE_PID 2>/dev/null
     exit 1
 fi
 
@@ -78,7 +95,7 @@ ros2 launch nav2_bringup bringup_launch.py \
     params_file:="$NAV2_PARAMS" \
     use_sim_time:=false \
     autostart:=true &
-NAV2_PID=$!
+PIDS+=($!)
 
 # Optional: RViz
 if [ -n "$RVIZ" ]; then
@@ -86,6 +103,7 @@ if [ -n "$RVIZ" ]; then
     echo "Starting RViz..."
     RVIZ_CFG="$REPO_DIR/config/nav2_go2.rviz"
     rviz2 -d "$RVIZ_CFG" &
+    PIDS+=($!)
 fi
 
 echo ""
@@ -97,5 +115,4 @@ echo ""
 echo "Press Ctrl+C to stop all."
 
 # Wait for bridge to exit
-wait $BRIDGE_PID
-kill $NAV2_PID 2>/dev/null
+wait ${PIDS[0]}

@@ -160,11 +160,13 @@ class Go2VNavBridge(Node):
         linear = msg.axes[4]    # right stick Y → forward/back
         angular = msg.axes[3]   # right stick X → yaw
         if abs(linear) > 0.05 or abs(angular) > 0.05:
-            vx = float(np.clip(linear * 0.5, -0.4, 0.4))
-            vyaw = float(np.clip(angular * 1.5, -1.5, 1.5))
+            vx = float(np.clip(linear * 0.8, -0.6, 0.8))
+            vyaw = float(np.clip(angular * 2.0, -2.0, 2.0))
             self._go2.set_velocity(vx, 0.0, vyaw)
             self._last_cmd_time = time.time()
-            self._teleop_until = time.time() + 0.5  # teleop priority for 500ms
+            self._teleop_until = time.time() + 0.5
+            # Clear path so path follower doesn't resume after teleop
+            self._current_path = []
             self._cmd_count += 1
             if self._cmd_count <= 3 or self._cmd_count % 50 == 0:
                 self.get_logger().info(f"teleop: vx={vx:.2f} vyaw={vyaw:.2f}")
@@ -182,6 +184,8 @@ class Go2VNavBridge(Node):
     def _cmd_vel_cb(self, msg: Twist) -> None:
         self._go2.set_velocity(msg.linear.x, msg.linear.y, msg.angular.z)
         self._last_cmd_time = time.time()
+        self._teleop_until = time.time() + 0.5
+        self._current_path = []
 
     def _publish_odom(self) -> None:
         """Publish /state_estimation at 200 Hz with frame map→sensor."""
@@ -309,7 +313,7 @@ class Go2VNavBridge(Node):
         and /speed handler scales it to desired speed.
         """
         speed = Float32()
-        speed.data = 0.5
+        speed.data = 0.8
         self._speed_pub.publish(speed)
 
     def _publish_camera(self) -> None:
@@ -416,7 +420,10 @@ class Go2VNavBridge(Node):
             self._current_path.append((mx, my))
 
         self._path_time = time.time()
-        if self._current_path:
+        # Throttle path log to once per second (localPlanner publishes at ~10Hz)
+        now_mono = time.monotonic()
+        if self._current_path and now_mono - getattr(self, '_last_path_log', 0) > 1.0:
+            self._last_path_log = now_mono
             self.get_logger().info(
                 f"Path: {len(self._current_path)} pts, "
                 f"target=({self._current_path[-1][0]:.1f},{self._current_path[-1][1]:.1f}) "
@@ -476,11 +483,11 @@ class Go2VNavBridge(Node):
             heading_err += 2 * math.pi
 
         # Pure pursuit: proportional yaw + forward speed based on alignment
-        vyaw = float(np.clip(heading_err * 2.0, -1.0, 1.0))
+        vyaw = float(np.clip(heading_err * 2.5, -1.5, 1.5))
 
         # Only drive forward when roughly aligned (< 45 degrees)
         if abs(heading_err) < 0.8:
-            vx = float(np.clip(dist * 0.5, 0.1, 0.4))
+            vx = float(np.clip(dist * 0.8, 0.15, 0.7))
         else:
             vx = 0.0  # rotate in place first
 
@@ -497,7 +504,7 @@ class Go2VNavBridge(Node):
             )
 
     def _safety_check(self) -> None:
-        if time.time() - self._last_cmd_time > 2.0:
+        if time.time() - self._last_cmd_time > 0.5:
             self._go2.set_velocity(0.0, 0.0, 0.0)
 
 

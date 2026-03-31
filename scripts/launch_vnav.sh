@@ -30,15 +30,30 @@ export ROBOT_CONFIG_PATH="unitree/unitree_go2"
 source /opt/ros/jazzy/setup.bash
 source "$NAV_STACK/install/setup.bash"
 
+# Run in own process group so cleanup can kill entire tree
+set -m
+
 PIDS=()
 cleanup() {
     echo ""
-    echo "Stopping all..."
-    for p in "${PIDS[@]}"; do kill $p 2>/dev/null; done
+    echo "Stopping all processes..."
+    # Kill tracked PIDs and their children
+    for p in "${PIDS[@]}"; do
+        kill -- -"$p" 2>/dev/null || kill "$p" 2>/dev/null
+    done
+    sleep 1
+    # Force kill any stragglers by name
+    for proc in pathFollower terrainAnalysis terrainAnalysisExt sensorScanGeneration \
+                localPlanner far_planner graphDecoder visualizationTools \
+                odom_transformer vehicleTransPublisher sensorTransPublisher; do
+        pkill -9 -f "$proc" 2>/dev/null || true
+    done
+    # Clean stale SHM to prevent port exhaustion on next run
+    rm -f /dev/shm/fastrtps_* 2>/dev/null
     wait 2>/dev/null
     echo "Done."
 }
-trap cleanup EXIT INT
+trap cleanup EXIT INT TERM
 
 RVIZ_CFG="$REPO_DIR/config/vnav.rviz"
 

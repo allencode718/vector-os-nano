@@ -129,7 +129,7 @@ _MPC_LEG_NAMES: list[str] = ["FL", "FR", "RL", "RR"]
 # Constants — lidar
 # ---------------------------------------------------------------------------
 
-_LIDAR_UPDATE_INTERVAL: int = 100  # physics steps between scans (~10 Hz)
+_LIDAR_UPDATE_INTERVAL: int = 200  # physics steps between scans (~5 Hz, 5200 rays/scan)
 
 
 # ---------------------------------------------------------------------------
@@ -789,8 +789,10 @@ class MuJoCoGo2:
         heading = self.get_heading()
         robot_body_id = self._mj.base_bid
 
-        n_azimuth = 360
-        elevations = [-15, -10, -5, 0, 5, 10, 15]
+        # Livox MID360-like pattern: 30 elevation rings (-25° to +25°), ~200 azimuth
+        # Denser near horizontal (1° steps), sparser at edges (2° steps)
+        n_azimuth = 200
+        elevations = list(range(-25, 26, 2))  # -25 to +25 in 2° steps = 26 rings
         mid_ring_ranges: list[float] = []
         points_3d: list[tuple[float, float, float, float]] = []
 
@@ -798,8 +800,9 @@ class MuJoCoGo2:
             elev_rad = math.radians(elev_deg)
             cos_elev = math.cos(elev_rad)
             sin_elev = math.sin(elev_rad)
+            azimuth_step = 360.0 / n_azimuth  # degrees per ray
             for i in range(n_azimuth):
-                azimuth = heading + math.radians(i - 180)
+                azimuth = heading + math.radians(i * azimuth_step - 180)
                 direction = np.array([
                     cos_elev * math.cos(azimuth),
                     cos_elev * math.sin(azimuth),
@@ -820,7 +823,7 @@ class MuJoCoGo2:
                     px = pos_lidar[0] + dist * direction[0]
                     py = pos_lidar[1] + dist * direction[1]
                     pz = pos_lidar[2] + dist * direction[2]
-                    points_3d.append((float(px), float(py), float(pz), 100.0))
+                    points_3d.append((float(px), float(py), float(pz), 0.0))
 
                 if elev_deg == 0:
                     mid_ring_ranges.append(
@@ -831,7 +834,7 @@ class MuJoCoGo2:
             timestamp=float(self._mj.data.time),
             angle_min=-math.pi,
             angle_max=math.pi,
-            angle_increment=math.radians(1.0),
+            angle_increment=math.radians(azimuth_step),
             range_min=0.1,
             range_max=12.0,
             ranges=tuple(mid_ring_ranges),

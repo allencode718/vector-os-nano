@@ -85,6 +85,12 @@ TARE planner (frontier exploration)
 
 **Sim-to-real:** The navigation stack (localPlanner, FAR planner, TARE, terrainAnalysis) is identical to what runs on real Unitree Go2 robots with Livox MID360 LiDAR. The MuJoCo bridge simulates the same sensor topics (`/state_estimation`, `/registered_scan`, `/terrain_map`) at matching specs (10k+ points/scan, 30-degree tilt, asymmetric FOV). Switching from sim to real hardware requires only changing the bridge node.
 
+<p align="center">
+  <img src="images/go2nav.png" width="700" alt="Go2 Navigation in MuJoCo">
+  <br>
+  <i>Go2 autonomous navigation in MuJoCo: house environment (top), RViz with LiDAR point cloud + terrain analysis + path planning (bottom-left), first-person camera view (bottom-right).</i>
+</p>
+
 ### SO-101 Arm -- Zero-Shot Grasping
 
 ```python

@@ -33,6 +33,47 @@
 
 ---
 
+### Built-in Agentic CLI: Vibe-code your robot
+
+Vector OS Nano ships with `vector-cli` -- an agentic terminal harness inspired by Claude Code. Talk to your robot, write code, run simulations, and explore environments, all from one prompt.
+
+```bash
+pip install -e .
+vector-cli                     # auto-detects OpenRouter API key
+```
+
+```
+vector> start the go2 simulation
+  start_simulation(sim_type="go2", gui=true) ... ok 2.1s
+
+vector> explore the house
+  explore(duration=60) ... ok 62.3s
+
+vector> list all python files here
+  glob(pattern="**/*.py") ... ok 0.1s
+
+vector> read run.py and tell me what it does
+  file_read(file_path="run.py") ... ok 0.0s
+```
+
+**What V can do:**
+
+| Capability | Tools |
+|------------|-------|
+| Robot control | start_simulation, walk, turn, stand, sit, explore, navigate, pick, place |
+| Codebase work | file_read, file_write, file_edit, bash, glob, grep |
+| Perception | world_query, robot_status, detect, describe |
+
+**Architecture:** Multi-backend LLM engine (OpenRouter, Anthropic, local models via OpenAI-compatible API) with streaming, tool-use loop, 6-layer permission system, JSONL session persistence, and concurrent read-only tool execution. 19 robot skills auto-registered at runtime when hardware connects.
+
+<p align="center">
+  <img src="images/agent.png" width="700" alt="Vector CLI with Go2 simulation">
+  <br>
+  <i>vector-cli controlling Go2 quadruped in MuJoCo: natural language conversation with V (right), live simulation (left).</i>
+</p>
+
+---
+
 <h3 align="center">Demo</h3>
 
 <p align="center">

@@ -862,10 +862,12 @@ def main() -> None:
         else:
             agent._vlm = None
 
-        # Initialize spatial memory for Go2
-        from vector_os_nano.core.spatial_memory import SpatialMemory
-        agent._spatial_memory = SpatialMemory()
-        print("Memory    : spatial memory initialized")
+        # Initialize scene graph (SysNav-inspired three-layer spatial memory)
+        from vector_os_nano.core.scene_graph import SceneGraph
+        agent._spatial_memory = SceneGraph()
+        print("Memory    : scene graph initialized (rooms -> viewpoints -> objects)")
+
+        # Visualization: RViz markers (published when ROS2 bridge is active)
 
     # Status summary
     print()

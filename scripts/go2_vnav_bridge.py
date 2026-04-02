@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import math
+import os
 import struct
 import sys
 import time
@@ -78,10 +79,14 @@ _SENSOR_Z: float = 0.1
 class Go2VNavBridge(Node):
     """ROS2 node bridging MuJoCoGo2 to Vector Navigation Stack."""
 
-    def __init__(self, go2: MuJoCoGo2) -> None:
+    def __init__(self, go2: MuJoCoGo2, quiet: bool = False) -> None:
         super().__init__("go2_vnav_bridge")
         self._go2 = go2
         self._last_cmd_time = time.time()
+        # Suppress verbose logging when embedded in CLI (floods terminal)
+        if quiet or os.environ.get("VECTOR_BRIDGE_QUIET"):
+            import rclpy.logging
+            self.get_logger().set_level(rclpy.logging.LoggingSeverity.WARN)
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -146,6 +151,15 @@ class Go2VNavBridge(Node):
         self.create_timer(0.5, self._publish_joy_speed)           # 2 Hz
         self.create_timer(1.0, self._safety_check)                # 1 Hz
 
+        # Scene graph visualization (1 Hz MarkerArray)
+        self._scene_graph = None  # set externally by agent
+        try:
+            from visualization_msgs.msg import MarkerArray
+            self._marker_pub = self.create_publisher(MarkerArray, "/scene_graph_markers", 5)
+            self.create_timer(1.0, self._publish_scene_graph_markers)
+        except ImportError:
+            self._marker_pub = None
+
         self.get_logger().info(
             "Go2VNavBridge started — /state_estimation, /registered_scan, /joy, /speed"
         )
@@ -172,14 +186,10 @@ class Go2VNavBridge(Node):
                 self.get_logger().info(f"teleop: vx={vx:.2f} vyaw={vyaw:.2f}")
 
     def _cmd_vel_stamped_cb(self, msg: TwistStamped) -> None:
-        vx = msg.twist.linear.x
-        vy = msg.twist.linear.y
-        vyaw = msg.twist.angular.z
-        self._go2.set_velocity(vx, vy, vyaw)
-        self._last_cmd_time = time.time()
-        self._cmd_count += 1
-        if self._cmd_count <= 3 or self._cmd_count % 100 == 0:
-            self.get_logger().info(f"cmd_vel: vx={vx:.3f} vy={vy:.3f} vyaw={vyaw:.3f}")
+        """DISABLED — C++ pathFollower sends backward velocity and aggressive
+        yaw for wheeled vehicles. Quadruped needs forward-only, gentle arcs.
+        Using Python _follow_path instead."""
+        pass
 
     def _cmd_vel_cb(self, msg: Twist) -> None:
         self._go2.set_velocity(msg.linear.x, msg.linear.y, msg.angular.z)
@@ -431,67 +441,81 @@ class Go2VNavBridge(Node):
             )
 
     def _follow_path(self) -> None:
-        """Simple pure-pursuit path follower at 20 Hz.
+        """Quadruped path follower (20 Hz).
 
-        Finds the lookahead point on the path and generates smooth velocity.
-        Much more stable than C++ pathFollower with MPC gait.
+        Key principles for stable MPC gait:
+        1. ALWAYS walk forward (min 0.08 m/s) — quadrupeds are stable walking
+        2. Never reverse — turn in arcs instead
+        3. Very gentle yaw (max 0.4 rad/s) — prevents gait disruption
+        4. Smooth rate limiting — no sudden velocity changes
+        5. If no path, gentle decelerate — don't hard stop
         """
-        # Don't override teleop or stale path
         if time.time() < self._teleop_until:
             return
-        if not self._current_path or time.time() - self._path_time > 5.0:
+
+        if not hasattr(self, '_prev_vx'):
+            self._prev_vx = 0.0
+            self._prev_vyaw = 0.0
+
+        has_path = (self._current_path
+                    and time.time() - self._path_time < 15.0)
+
+        if not has_path:
+            # Gentle decel
+            self._prev_vx *= 0.95
+            self._prev_vyaw *= 0.95
+            if abs(self._prev_vx) < 0.02:
+                self._prev_vx = 0.0
+                self._prev_vyaw = 0.0
+            self._go2.set_velocity(self._prev_vx, 0.0, self._prev_vyaw)
+            self._last_cmd_time = time.time()
             return
 
         odom = self._go2.get_odometry()
         rx, ry = odom.x, odom.y
         heading = self._go2.get_heading()
 
-        # Find lookahead point (0.8m ahead on path)
-        lookahead = 0.8
+        # Lookahead: use a point 1.5m ahead on path
         target = None
         for px, py in self._current_path:
-            d = math.sqrt((px - rx) ** 2 + (py - ry) ** 2)
-            if d >= lookahead:
+            if math.sqrt((px - rx)**2 + (py - ry)**2) >= 1.5:
                 target = (px, py)
                 break
-
-        # If no point far enough, use last point
-        if target is None and self._current_path:
+        if target is None:
             target = self._current_path[-1]
 
-        if target is None:
-            return
+        dx, dy = target[0] - rx, target[1] - ry
+        dist = math.sqrt(dx*dx + dy*dy)
 
-        tx, ty = target
-        dx = tx - rx
-        dy = ty - ry
-        dist = math.sqrt(dx * dx + dy * dy)
+        # Heading error
+        desired = math.atan2(dy, dx)
+        err = desired - heading
+        while err > math.pi: err -= 2 * math.pi
+        while err < -math.pi: err += 2 * math.pi
 
-        # Close enough — stop
-        if dist < 0.3:
-            self._go2.set_velocity(0.0, 0.0, 0.0)
-            self.get_logger().info(f"Path follower: reached target (dist={dist:.2f})")
-            self._current_path = []
-            return
+        # Yaw: gentle, capped
+        vyaw_target = float(np.clip(err * 0.5, -0.4, 0.4))
 
-        # Heading to target
-        desired_heading = math.atan2(dy, dx)
-        heading_err = desired_heading - heading
-        while heading_err > math.pi:
-            heading_err -= 2 * math.pi
-        while heading_err < -math.pi:
-            heading_err += 2 * math.pi
+        # Forward: ALWAYS positive. cos(err) gives natural speed curve.
+        # At 0 error: full speed. At 90 deg: minimum speed. At 180: minimum.
+        alignment = max(0.2, math.cos(min(abs(err), 1.4)))
+        vx_target = float(np.clip(0.5 * alignment, 0.1, 0.5))
 
-        # Pure pursuit: proportional yaw + forward speed based on alignment
-        vyaw = float(np.clip(heading_err * 2.5, -1.5, 1.5))
+        # If very close to target, slow down but don't stop
+        if dist < 0.5:
+            vx_target = min(vx_target, 0.1)
 
-        # Only drive forward when roughly aligned (< 45 degrees)
-        if abs(heading_err) < 0.8:
-            vx = float(np.clip(dist * 0.8, 0.15, 0.7))
-        else:
-            vx = 0.0  # rotate in place first
+        # Rate limiter
+        max_dvx = 0.04
+        max_dvyaw = 0.06
 
-        self._go2.set_velocity(vx, 0.0, vyaw)
+        vx = self._prev_vx + float(np.clip(vx_target - self._prev_vx, -max_dvx, max_dvx))
+        vyaw = self._prev_vyaw + float(np.clip(vyaw_target - self._prev_vyaw, -max_dvyaw, max_dvyaw))
+
+        self._prev_vx = max(0.0, float(vx))  # NEVER negative
+        self._prev_vyaw = float(vyaw)
+
+        self._go2.set_velocity(self._prev_vx, 0.0, self._prev_vyaw)
         self._last_cmd_time = time.time()
         # Log every 1 second (20Hz timer, so every 20th call)
         if not hasattr(self, '_follow_count'):
@@ -500,12 +524,44 @@ class Go2VNavBridge(Node):
         if self._follow_count % 20 == 0:
             self.get_logger().info(
                 f"Following: vx={vx:.2f} vyaw={vyaw:.2f} dist={dist:.2f} "
-                f"heading_err={math.degrees(heading_err):.1f}deg target=({tx:.1f},{ty:.1f})"
+                f"err={math.degrees(err):.1f}deg target=({target[0]:.1f},{target[1]:.1f})"
             )
 
     def _safety_check(self) -> None:
-        if time.time() - self._last_cmd_time > 0.5:
+        # 5s timeout — must be long enough for TARE to initialize and
+        # start publishing waypoints after exploration begins.
+        # Also skip if exploration background thread is actively running.
+        if time.time() - self._last_cmd_time > 5.0:
+            try:
+                from vector_os_nano.skills.go2.explore import is_exploring
+                if is_exploring():
+                    return  # don't zero velocity during exploration startup
+            except ImportError:
+                pass
             self._go2.set_velocity(0.0, 0.0, 0.0)
+
+    def _publish_scene_graph_markers(self) -> None:
+        """Publish scene graph visualization as MarkerArray (1 Hz)."""
+        if self._marker_pub is None:
+            return
+        try:
+            from vector_os_nano.ros2.nodes.scene_graph_viz import (
+                build_scene_graph_markers,
+            )
+            odom = self._go2.get_odometry()
+            heading = self._go2.get_heading()
+            stamp = self.get_clock().now().to_msg()
+            ma = build_scene_graph_markers(
+                scene_graph=self._scene_graph,
+                stamp=stamp,
+                robot_x=odom.x,
+                robot_y=odom.y,
+                robot_heading=heading,
+            )
+            if ma is not None:
+                self._marker_pub.publish(ma)
+        except Exception:
+            pass  # visualization is best-effort
 
 
 def main():

@@ -283,13 +283,24 @@ class NavigateSkill:
 
         target = _ROOM_CENTERS[room_key]
 
+        # Cancel background exploration if running (navigate takes priority)
+        try:
+            from vector_os_nano.skills.go2.explore import cancel_exploration, is_exploring
+            if is_exploring():
+                cancel_exploration()
+                logger.info("[NAV] Cancelled background exploration for navigation")
+        except Exception:
+            pass
+
         # --- Mode 1: NavStackClient ---
         nav = context.services.get("nav")
         if nav is not None and nav.is_available:
-            return self._navigate_with_nav_stack(nav, room_key, target, context)
+            result = self._navigate_with_nav_stack(nav, room_key, target, context)
+        else:
+            # --- Mode 2: Dead-reckoning fallback ---
+            result = self._dead_reckoning(room_key, context)
 
-        # --- Mode 2: Dead-reckoning fallback ---
-        return self._dead_reckoning(room_key, context)
+        return result
 
     # ------------------------------------------------------------------
     # Navigation modes (private)

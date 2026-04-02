@@ -18,6 +18,7 @@ class Go2ROS2Proxy:
 
     Publishes: /cmd_vel_nav (Twist) for velocity commands
     Subscribes: /state_estimation (Odometry) for position/heading
+                /camera/image (Image) for VLM perception
     """
 
     def __init__(self) -> None:
@@ -26,6 +27,8 @@ class Go2ROS2Proxy:
         self._position: tuple[float, float, float] = (0.0, 0.0, 0.28)
         self._heading: float = 0.0
         self._connected: bool = False
+        self._last_odom: Any = None
+        self._last_camera_frame: Any = None  # numpy (H, W, 3) uint8
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -51,10 +54,26 @@ class Go2ROS2Proxy:
             )
 
             from geometry_msgs.msg import Twist  # noqa: F401 — ensure importable
+            from sensor_msgs.msg import Image
+
             self._cmd_pub = self._node.create_publisher(Twist, "/cmd_vel_nav", 10)
             self._node.create_subscription(
                 Odometry, "/state_estimation", self._odom_cb, reliable_qos
             )
+            self._node.create_subscription(
+                Image, "/camera/image", self._camera_cb, reliable_qos
+            )
+
+            # Scene graph marker publisher (agent sets self._scene_graph)
+            self._scene_graph = None
+            try:
+                from visualization_msgs.msg import MarkerArray
+                self._marker_pub = self._node.create_publisher(
+                    MarkerArray, "/scene_graph_markers", 5
+                )
+                self._node.create_timer(1.0, self._publish_markers)
+            except ImportError:
+                self._marker_pub = None
 
             # Spin in a background daemon thread so the caller is not blocked.
             self._spin_thread = threading.Thread(
@@ -90,16 +109,26 @@ class Go2ROS2Proxy:
 
     def _odom_cb(self, msg: Any) -> None:
         """Update cached position and heading from incoming Odometry message."""
+        self._last_odom = msg
         self._position = (
             msg.pose.pose.position.x,
             msg.pose.pose.position.y,
             msg.pose.pose.position.z,
         )
         q = msg.pose.pose.orientation
-        # Convert quaternion to yaw (Z-up convention).
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         self._heading = math.atan2(siny_cosp, cosy_cosp)
+
+    def _camera_cb(self, msg: Any) -> None:
+        """Cache latest camera frame from /camera/image (RGB8 240x320)."""
+        try:
+            import numpy as np
+            frame = np.frombuffer(msg.data, dtype=np.uint8)
+            frame = frame.reshape((msg.height, msg.width, 3))
+            self._last_camera_frame = frame
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # State accessors
@@ -112,6 +141,36 @@ class Go2ROS2Proxy:
     def get_heading(self) -> float:
         """Return last known heading in radians (yaw from odometry)."""
         return self._heading
+
+    def get_camera_frame(self, width: int = 320, height: int = 240) -> Any:
+        """Return latest RGB camera frame as (H, W, 3) uint8 numpy array.
+
+        Received from /camera/image topic published by Go2VNavBridge.
+        Returns a black frame if no image has been received yet.
+        """
+        import numpy as np
+        if self._last_camera_frame is not None:
+            return self._last_camera_frame.copy()
+        return np.zeros((height, width, 3), dtype=np.uint8)
+
+    def get_odometry(self) -> Any:
+        """Return latest Odometry data as a types.Odometry dataclass."""
+        from vector_os_nano.core.types import Odometry
+        pos = self._position
+        return Odometry(
+            timestamp=time.time(),
+            x=pos[0], y=pos[1], z=pos[2],
+            qx=0.0, qy=0.0, qz=0.0, qw=1.0,
+            vx=0.0, vy=0.0, vz=0.0, vyaw=0.0,
+        )
+
+    @property
+    def name(self) -> str:
+        return "go2_ros2_proxy"
+
+    @property
+    def supports_lidar(self) -> bool:
+        return False
 
     # ------------------------------------------------------------------
     # Motion interface (matches MuJoCoGo2 public API)
@@ -154,3 +213,20 @@ class Go2ROS2Proxy:
         """Best-effort sit: stop motion (cannot command sit via ROS2 velocity)."""
         self.set_velocity(0.0, 0.0, 0.0)
         time.sleep(duration)
+
+    def _publish_markers(self) -> None:
+        """Publish scene graph visualization as MarkerArray at 1 Hz."""
+        if self._marker_pub is None or self._scene_graph is None:
+            return
+        try:
+            from vector_os_nano.ros2.nodes.scene_graph_viz import build_scene_graph_markers
+            pos = self._position
+            ma = build_scene_graph_markers(
+                scene_graph=self._scene_graph,
+                robot_x=pos[0], robot_y=pos[1],
+                robot_heading=self._heading,
+            )
+            if ma is not None:
+                self._marker_pub.publish(ma)
+        except Exception:
+            pass

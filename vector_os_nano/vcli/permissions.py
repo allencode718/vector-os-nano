@@ -70,11 +70,13 @@ class PermissionContext:
         if tool_name in self.deny_tools:
             return PermissionResult("deny", f"Tool '{tool_name}' is denied")
 
-        # 2. Tool-specific safety check (can deny even if session-allow exists)
+        # 2. Tool-specific safety check (can deny or allow explicitly)
         tool_perm: PermissionResult | None = None
         if hasattr(tool, "check_permissions"):
             tool_perm = tool.check_permissions(params, tool_context)
             if tool_perm.behavior == "deny":
+                return tool_perm
+            if tool_perm.behavior == "allow":
                 return tool_perm
 
         # 3. Session always-allow

@@ -47,6 +47,15 @@ class StopSkill:
                 diagnosis_code="no_base",
             )
 
+        # Cancel any background exploration
+        try:
+            from vector_os_nano.skills.go2.explore import cancel_exploration, is_exploring
+            if is_exploring():
+                cancel_exploration()
+                logger.info("[STOP] Background exploration cancelled")
+        except Exception:
+            pass
+
         # Hard stop via base interface
         try:
             context.base.set_velocity(0.0, 0.0, 0.0)

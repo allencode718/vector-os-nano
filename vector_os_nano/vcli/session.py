@@ -153,10 +153,14 @@ class Session:
             if etype == "user":
                 messages.append({"role": "user", "content": entry["content"]})
             elif etype == "assistant":
-                content: list[dict[str, Any]] = [{"type": "text", "text": entry["text"]}]
+                content: list[dict[str, Any]] = []
+                # Only include text block if non-empty (Anthropic rejects empty text)
+                if entry.get("text"):
+                    content.append({"type": "text", "text": entry["text"]})
                 if entry.get("tool_use"):
                     content.extend(entry["tool_use"])
-                messages.append({"role": "assistant", "content": content})
+                if content:
+                    messages.append({"role": "assistant", "content": content})
             elif etype == "tool_result":
                 tool_result_blocks = [
                     {

@@ -107,14 +107,22 @@ class LookSkill:
         # Prefer VLM room over positional heuristic; fall back if "unknown".
         room: str = room_id.room if room_id.room != "unknown" else _fallback_room(context)
 
-        # Record to SpatialMemory if available.
+        # Record to spatial memory / scene graph.
         spatial_memory = context.services.get("spatial_memory")
         if spatial_memory is not None:
             object_names: list[str] = [obj.name for obj in scene.objects]
             try:
                 pos = context.base.get_position()
-                spatial_memory.visit(room, float(pos[0]), float(pos[1]))
-                spatial_memory.observe(room, object_names, scene.summary)
+                heading = context.base.get_heading()
+                # Prefer SceneGraph viewpoint-aware API if available
+                if hasattr(spatial_memory, "observe_with_viewpoint"):
+                    spatial_memory.observe_with_viewpoint(
+                        room, float(pos[0]), float(pos[1]),
+                        float(heading), object_names, scene.summary,
+                    )
+                else:
+                    spatial_memory.visit(room, float(pos[0]), float(pos[1]))
+                    spatial_memory.observe(room, object_names, scene.summary)
             except Exception as exc:
                 logger.warning("[LOOK] spatial_memory update failed: %s", exc)
 

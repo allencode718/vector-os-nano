@@ -370,13 +370,127 @@ def _init_agent(args: argparse.Namespace) -> Any:
             arm = MuJoCoArm()
             arm.connect()
             return Agent(arm=arm)
+
+        # --- Go2 full stack: MuJoCo + ROS2 bridge + nav stack + VLM + Rerun ---
         from vector_os_nano.hardware.sim.mujoco_go2 import MuJoCoGo2  # type: ignore[import]
-        base = MuJoCoGo2()
+        import os
+
+        console.print(f"[dim]  Starting Go2 MuJoCo simulation...[/dim]")
+        base = MuJoCoGo2(gui=True, room=True, backend="auto")
         base.connect()
-        return Agent(base=base)
+        base.stand()
+
+        # Load config for API key
+        from vector_os_nano.core.config import load_config
+        cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)
+        ))), "config", "user.yaml")
+        cfg = load_config(cfg_path) if os.path.exists(cfg_path) else {}
+        api_key = (
+            args.api_key
+            or cfg.get("llm", {}).get("api_key")
+            or os.environ.get("OPENROUTER_API_KEY", "")
+        )
+
+        agent = Agent(base=base, llm_api_key=api_key, config=cfg)
+
+        # Register Go2 skills
+        from vector_os_nano.skills.go2 import get_go2_skills
+        for skill in get_go2_skills():
+            agent._skill_registry.register(skill)
+
+        # VLM perception (GPT-4o via OpenRouter)
+        if api_key:
+            try:
+                from vector_os_nano.perception.vlm_go2 import Go2VLMPerception
+                agent._vlm = Go2VLMPerception(config={"api_key": api_key})
+                console.print(f"[dim]  VLM: GPT-4o via OpenRouter[/dim]")
+            except Exception:
+                agent._vlm = None
+
+        # Scene graph (SysNav-style)
+        from vector_os_nano.core.scene_graph import SceneGraph
+        agent._spatial_memory = SceneGraph()
+        console.print(f"[dim]  Memory: scene graph (rooms -> viewpoints -> objects)[/dim]")
+
+        # ROS2 bridge + nav stack (background)
+        try:
+            _launch_ros2_stack(base)
+            console.print(f"[dim]  ROS2: bridge + nav stack launched[/dim]")
+        except Exception as exc:
+            console.print(f"[dim]  ROS2: not available ({exc})[/dim]")
+
+        return agent
+
     except Exception as exc:
         console.print(f"[yellow]Warning: Could not init simulation: {exc}[/yellow]")
+        import traceback
+        traceback.print_exc()
         return None
+
+
+def _launch_ros2_stack(go2: Any) -> None:
+    """Launch ROS2 bridge + Vector Nav Stack in background.
+
+    Starts the bridge in a daemon thread and the nav stack as a subprocess.
+    Non-blocking — returns immediately after launching.
+    """
+    import subprocess
+    import signal
+    import atexit
+    import os
+    import threading
+
+    # 1. Start ROS2 bridge on existing MuJoCoGo2
+    try:
+        import rclpy
+        if not rclpy.ok():
+            rclpy.init()
+
+        import importlib.util
+        import sys
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        bridge_path = os.path.join(repo, "scripts", "go2_vnav_bridge.py")
+        spec = importlib.util.spec_from_file_location("_vnav_bridge", bridge_path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["_vnav_bridge"] = mod
+        spec.loader.exec_module(mod)
+
+        node = mod.Go2VNavBridge(go2)
+
+        def _spin():
+            try:
+                rclpy.spin(node)
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_spin, daemon=True)
+        t.start()
+    except ImportError:
+        raise RuntimeError("ROS2 (rclpy) not available")
+
+    # 2. Launch nav stack nodes
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    script = os.path.join(repo, "scripts", "launch_nav_only.sh")
+    if os.path.isfile(script):
+        log_fh = open("/tmp/vector_nav_only.log", "w")
+        proc = subprocess.Popen(
+            [script], stdout=log_fh, stderr=subprocess.STDOUT,
+            preexec_fn=os.setsid,
+        )
+
+        def _cleanup():
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+            log_fh.close()
+
+        atexit.register(_cleanup)
 
 
 # ---------------------------------------------------------------------------
@@ -619,20 +733,55 @@ def _handle_slash_command(
                 console.print("[yellow]No app state.[/]")
             else:
                 prov = app_state["provider"]
-                # Strip provider prefix for Anthropic direct, add for OpenRouter
-                if prov == "anthropic" and "/" in new_model:
+                api_key = app_state["api_key"]
+
+                # Auto-detect provider from model name
+                # "openai/gpt-4o", "google/gemini-*", "meta-llama/*" → openrouter
+                # "claude-*" without prefix → anthropic (if current provider)
+                if "/" in new_model and prov == "anthropic":
+                    # Model has provider prefix → switch to OpenRouter
+                    prov = "openrouter"
+                    # Use OpenRouter API key (from config or env)
+                    import os
+                    or_key = os.environ.get("OPENROUTER_API_KEY", "")
+                    if not or_key:
+                        try:
+                            from vector_os_nano.vcli.config import load_config as _lc
+                            or_key = _lc().get("openrouter_api_key", "")
+                        except Exception:
+                            pass
+                    if not or_key:
+                        # Try user.yaml
+                        try:
+                            import yaml
+                            cfg_path = os.path.join(os.path.dirname(os.path.dirname(
+                                os.path.dirname(os.path.abspath(__file__))
+                            )), "config", "user.yaml")
+                            with open(cfg_path) as f:
+                                cfg = yaml.safe_load(f)
+                            or_key = cfg.get("llm", {}).get("api_key", "")
+                        except Exception:
+                            pass
+                    if or_key:
+                        api_key = or_key
+                    else:
+                        console.print("[yellow]  No OpenRouter API key found (set OPENROUTER_API_KEY)[/]")
+                        return True
+                elif prov == "anthropic" and "/" in new_model:
                     new_model = new_model.split("/", 1)[1]
                 elif prov == "openrouter" and "/" not in new_model:
                     new_model = f"anthropic/{new_model}"
+
                 new_backend = create_backend(
                     provider=prov,
-                    api_key=app_state["api_key"],
+                    api_key=api_key,
                     model=new_model,
                     base_url=app_state.get("base_url"),
                 )
                 app_state["engine"]._backend = new_backend
                 app_state["model"] = new_model
-                console.print(f"  Switched to [{TEAL}]{new_model}[/]")
+                app_state["provider"] = prov
+                console.print(f"  Switched to [{TEAL}]{new_model}[/] ({prov})")
 
     elif cmd == "status":
         agent = (app_state or {}).get("agent")
@@ -665,6 +814,57 @@ def _handle_slash_command(
 # ---------------------------------------------------------------------------
 # Main REPL
 # ---------------------------------------------------------------------------
+
+
+_ROOM_LABELS: dict[str, str] = {
+    "living_room": "Living Room", "dining_room": "Dining Room",
+    "kitchen": "Kitchen", "study": "Study",
+    "master_bedroom": "Master Bedroom", "guest_bedroom": "Guest Bedroom",
+    "bathroom": "Bathroom", "hallway": "Hallway",
+}
+
+
+def _setup_explore_events(console: Any) -> None:
+    """Hook exploration background events into Rich console output."""
+    try:
+        from vector_os_nano.skills.go2.explore import set_event_callback
+    except ImportError:
+        return
+
+    def _on_explore_event(event_type: str, data: dict) -> None:
+        if event_type == "started":
+            total = data.get("total_rooms", 8)
+            console.print(f"  [dim]Exploration started ({total} rooms to discover)[/dim]")
+
+        elif event_type == "room_entered":
+            room = data.get("room", "?")
+            visited = data.get("visited", 0)
+            total = data.get("total", 8)
+            label = _ROOM_LABELS.get(room, room)
+            bar = f"[{'#' * visited}{'.' * (total - visited)}]"
+            console.print(
+                f"  [{TEAL}]>> {label}[/] [dim]{bar} {visited}/{total}[/dim]"
+            )
+
+        elif event_type == "completed":
+            rooms = data.get("rooms", [])
+            console.print(
+                f"  [green]Exploration complete![/] "
+                f"[dim]All {len(rooms)} rooms discovered.[/dim]"
+            )
+
+        elif event_type == "stopped":
+            reason = data.get("reason", "unknown")
+            rooms = data.get("rooms", [])
+            if reason == "cancelled":
+                console.print(
+                    f"  [yellow]Exploration stopped.[/] "
+                    f"[dim]{len(rooms)} rooms discovered so far.[/dim]"
+                )
+            elif reason == "robot_fell":
+                console.print(f"  [red]Robot fell! Exploration aborted.[/]")
+
+    set_event_callback(_on_explore_event)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -878,6 +1078,10 @@ def main(argv: list[str] | None = None) -> None:
                     elapsed = time.monotonic() - _tool_start_times.pop(name, time.monotonic())
                     tag = "[green]ok[/]" if not result.is_error else "[red]fail[/]"
                     console.print(f" {tag} [dim]{elapsed:.1f}s[/]")
+
+                    # Hook explore event callback after sim/explore tools run
+                    if name in ("start_simulation", "explore"):
+                        _setup_explore_events(console)
 
                 thinking_panel = Panel(
                     Text("thinking...", style="dim italic"),

@@ -43,9 +43,10 @@ Skills (12 total):
 | VLM Accuracy (L5) | **1-2/8** | Diagnostic: MuJoCo rendering limits room ID |
 | ToolAgent (L5) | **6/6** | 中文指令, navigate, look, multi-turn context |
 | Robustness (L6) | **32/32** | VLM errors, nav edge cases, spatial memory |
+| SceneGraph (L7) | **55/55** | 3-layer graph, viewpoints, coverage, merge, persist |
 | Nav2 integration | **11/11** | AMCL + MPPI, goal arrival |
 | SLAM mapping | **3/3** | map grows during movement |
-| **Total harness** | **117/118** | 1 xfail (VLM accuracy variance) |
+| **Total harness** | **172/173** | 1 xfail (VLM accuracy variance) |
 
 ### What's New (v0.6.0-dev)
 - **VLM Perception**: GPT-4o via OpenRouter analyzes Go2 camera frames
@@ -76,6 +77,17 @@ Skills (12 total):
 1. FAR planner publishes /way_point but not /global_path (graph_decoder issue)
 2. Camera depth rendering intermittent (MuJoCo API)
 3. MobileAgentLoop LLM planning requires API key (fallback planner works without)
+4. RViz scene graph markers not yet visible (proxy publishes but RViz display may need manual add)
+5. VLM look via proxy `/camera/image` — implemented but untested end-to-end in agent mode
+
+### TODO
+- [ ] Verify VLM look works via Go2ROS2Proxy camera subscription
+- [ ] Verify RViz markers appear (may need to manually add MarkerArray display in RViz)
+- [ ] ExploreSkill + VLM: auto-look at each new room during exploration
+- [ ] MobileAgentLoop with real LLM planning (Task #13)
+- [ ] Improve VLM room accuracy (higher res, multi-angle, better scene textures)
+- [ ] Persist SceneGraph across sessions (YAML save/load)
+- [ ] Go2ROS2Proxy: add sit/lie_down via ROS2 service (currently just zero velocity)
 
 ### Scripts
 | Script | Purpose |

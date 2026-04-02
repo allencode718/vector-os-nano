@@ -104,21 +104,84 @@ class SimStartTool:
 
     @staticmethod
     def _start_go2(gui: bool = True) -> Any:
+        import os
+        import signal
+        import subprocess
+        import atexit
+        import time as _time
         from vector_os_nano.core.agent import Agent  # type: ignore[import]
-        from vector_os_nano.hardware.sim.mujoco_go2 import MuJoCoGo2  # type: ignore[import]
-        base = MuJoCoGo2(gui=gui)
+        from vector_os_nano.core.config import load_config
+
+        # Launch full stack as SEPARATE PROCESS (stable gait — no GIL contention)
+        # This is the same architecture as run.py --sim-go2 --explore
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)
+        ))))
+        vnav_script = os.path.join(repo, "scripts", "launch_vnav.sh")
+        gui_flag = [] if gui else ["--no-gui"]
+
+        log_fh = open("/tmp/vector_vnav.log", "w")
+        vnav_proc = subprocess.Popen(
+            ["bash", vnav_script] + gui_flag,
+            stdout=log_fh, stderr=subprocess.STDOUT,
+            preexec_fn=os.setsid,
+        )
+
+        def _cleanup():
+            try:
+                os.killpg(os.getpgid(vnav_proc.pid), signal.SIGTERM)
+                vnav_proc.wait(timeout=5)
+            except Exception:
+                try:
+                    os.killpg(os.getpgid(vnav_proc.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+            log_fh.close()
+
+        atexit.register(_cleanup)
+
+        # Wait for MuJoCo + bridge + nav stack to initialize
+        _time.sleep(20)
+
+        # Connect via ROS2 proxy (same as run.py --explore)
+        from vector_os_nano.hardware.sim.go2_ros2_proxy import Go2ROS2Proxy
+        base = Go2ROS2Proxy()
         base.connect()
-        agent = Agent(base=base)
-        # Register Go2-specific skills (walk, turn, explore, navigate, etc.)
-        try:
-            from vector_os_nano.skills.go2 import get_go2_skills  # type: ignore[import]
-            for skill in get_go2_skills():
-                agent.register_skill(skill)
-        except Exception:
-            pass  # Go2 skills optional
+
+        pos = base.get_position()
+        if pos == (0.0, 0.0, 0.28):
+            # Default position — wait more for odom
+            _time.sleep(5)
+            pos = base.get_position()
+
+        # Load config for API key
+        cfg_path = os.path.join(repo, "config", "user.yaml")
+        cfg = load_config(cfg_path) if os.path.exists(cfg_path) else {}
+        api_key = cfg.get("llm", {}).get("api_key") or os.environ.get("OPENROUTER_API_KEY", "")
+
+        agent = Agent(base=base, llm_api_key=api_key, config=cfg)
+
+        # Go2 skills
+        from vector_os_nano.skills.go2 import get_go2_skills  # type: ignore[import]
+        for skill in get_go2_skills():
+            agent._skill_registry.register(skill)
+
+        # VLM perception (GPT-4o via OpenRouter)
+        if api_key:
+            try:
+                from vector_os_nano.perception.vlm_go2 import Go2VLMPerception
+                agent._vlm = Go2VLMPerception(config={"api_key": api_key})
+            except Exception:
+                agent._vlm = None
+
+        # Scene graph — also attach to proxy for RViz marker publishing
+        from vector_os_nano.core.scene_graph import SceneGraph
+        agent._spatial_memory = SceneGraph()
+        base._scene_graph = agent._spatial_memory
+
         return agent
 
     def check_permissions(
         self, params: dict[str, Any], context: ToolContext
     ) -> PermissionResult:
-        return PermissionResult(behavior="ask", reason=f"Start {params.get('sim_type', '?')} simulation?")
+        return PermissionResult(behavior="allow", reason="Simulation startup")

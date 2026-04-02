@@ -491,6 +491,25 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /goal_pose
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: SceneGraph
+      Namespaces:
+        nav_goal: true
+        object_labels: true
+        objects: true
+        robot: true
+        room_labels: true
+        rooms: true
+        viewpoints: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /scene_graph_markers
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 0; 0; 0

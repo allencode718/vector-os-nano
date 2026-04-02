@@ -325,14 +325,15 @@ def _exploration_loop(base: Any, has_bridge: bool = True) -> None:
                     break
 
                 # Wander: keep the robot moving so TARE gets scan data.
-                # Send velocity every 2s. The /cmd_vel_nav topic gives
-                # the bridge ~0.5s of teleop override, then path follower
-                # tries to take over. By re-sending every 2s we ensure
-                # continuous movement while still allowing nav stack paths
-                # to briefly execute between our wander commands.
+                # The bridge's _cmd_vel_cb sets teleop_until = now + 0.5s, so
+                # the robot moves for 0.5s after each command, then _follow_path
+                # decelerates it to zero (no path is set). Re-sending every 0.8s
+                # keeps the gap between teleop expiry and next command to ≤0.3s
+                # (vs 1.5s at the previous 2.0s interval) — significantly more
+                # scan data for sensorScanGeneration + TARE.
                 if has_bridge:
                     now = time.time()
-                    if now - _last_wander > 2.0:
+                    if now - _last_wander > 0.8:
                         base.set_velocity(0.15, 0.0, _wander_heading)
                         _last_wander = now
                         # Reverse turn direction occasionally to avoid circles
@@ -442,7 +443,7 @@ class ExploreSkill:
         spatial_memory = context.services.get("spatial_memory")
         if vlm is not None:
             def _do_auto_look(room: str) -> dict | None:
-                """Capture frame, run VLM, record to scene graph."""
+                """Capture RGBD, run VLM, use depth to project object world position."""
                 try:
                     frame = base.get_camera_frame()
                     scene = vlm.describe_scene(frame)
@@ -450,16 +451,40 @@ class ExploreSkill:
                     detected_room = room_id.room if room_id.room != "unknown" else room
 
                     obj_names = [o.name for o in scene.objects]
+
+                    # Use depth to find world position of what robot sees
+                    obs_x, obs_y = 0.0, 0.0
+                    pos = base.get_position()
+                    heading = base.get_heading()
+
+                    if hasattr(base, "get_depth_frame"):
+                        try:
+                            depth = base.get_depth_frame()
+                            from vector_os_nano.perception.depth_projection import (
+                                d435_intrinsics, project_center_to_world,
+                            )
+                            intr = d435_intrinsics(depth.shape[1], depth.shape[0])
+                            world_pt = project_center_to_world(
+                                depth, intr,
+                                float(pos[0]), float(pos[1]), float(pos[2]),
+                                float(heading),
+                            )
+                            if world_pt is not None:
+                                obs_x, obs_y = world_pt[0], world_pt[1]
+                        except Exception:
+                            pass
+
+                    if obs_x == 0.0 and obs_y == 0.0:
+                        obs_x, obs_y = float(pos[0]), float(pos[1])
+
                     if spatial_memory is not None:
-                        pos = base.get_position()
-                        heading = base.get_heading()
                         if hasattr(spatial_memory, "observe_with_viewpoint"):
                             spatial_memory.observe_with_viewpoint(
-                                detected_room, float(pos[0]), float(pos[1]),
+                                detected_room, obs_x, obs_y,
                                 float(heading), obj_names, scene.summary,
                             )
                         else:
-                            spatial_memory.visit(detected_room, float(pos[0]), float(pos[1]))
+                            spatial_memory.visit(detected_room, obs_x, obs_y)
                             spatial_memory.observe(detected_room, obj_names, scene.summary)
 
                     return {

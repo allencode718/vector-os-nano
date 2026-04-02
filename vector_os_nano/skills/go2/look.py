@@ -81,7 +81,7 @@ class LookSkill:
                 diagnosis_code="no_vlm",
             )
 
-        # Capture frame from robot camera.
+        # Capture RGB + depth from robot camera (sim: MuJoCo, real: D435).
         try:
             frame: np.ndarray = context.base.get_camera_frame()
         except Exception as exc:
@@ -91,6 +91,14 @@ class LookSkill:
                 error_message=f"Camera capture failed: {exc}",
                 diagnosis_code="camera_failed",
             )
+
+        # Depth frame for 3D object positioning (optional — works without)
+        depth_frame = None
+        if hasattr(context.base, "get_depth_frame"):
+            try:
+                depth_frame = context.base.get_depth_frame()
+            except Exception:
+                pass
 
         # Run VLM calls — both scene description and room identification.
         try:
@@ -107,21 +115,49 @@ class LookSkill:
         # Prefer VLM room over positional heuristic; fall back if "unknown".
         room: str = room_id.room if room_id.room != "unknown" else _fallback_room(context)
 
+        # Compute world position of what the robot is looking at using depth.
+        # This gives us the (x, y) where objects should be placed on the map.
+        obs_x, obs_y = 0.0, 0.0
+        pos = context.base.get_position()
+        heading = context.base.get_heading()
+
+        if depth_frame is not None:
+            try:
+                from vector_os_nano.perception.depth_projection import (
+                    d435_intrinsics,
+                    project_center_to_world,
+                )
+                intr = d435_intrinsics(depth_frame.shape[1], depth_frame.shape[0])
+                world_pt = project_center_to_world(
+                    depth_frame, intr,
+                    float(pos[0]), float(pos[1]), float(pos[2]),
+                    float(heading),
+                )
+                if world_pt is not None:
+                    obs_x, obs_y = world_pt[0], world_pt[1]
+                    logger.info(
+                        "[LOOK] Depth projection: (%.1f, %.1f) → world (%.1f, %.1f)",
+                        pos[0], pos[1], obs_x, obs_y,
+                    )
+            except Exception as exc:
+                logger.debug("[LOOK] Depth projection failed: %s", exc)
+
+        # Fall back to robot position if depth projection unavailable
+        if obs_x == 0.0 and obs_y == 0.0:
+            obs_x, obs_y = float(pos[0]), float(pos[1])
+
         # Record to spatial memory / scene graph.
         spatial_memory = context.services.get("spatial_memory")
         if spatial_memory is not None:
             object_names: list[str] = [obj.name for obj in scene.objects]
             try:
-                pos = context.base.get_position()
-                heading = context.base.get_heading()
-                # Prefer SceneGraph viewpoint-aware API if available
                 if hasattr(spatial_memory, "observe_with_viewpoint"):
                     spatial_memory.observe_with_viewpoint(
-                        room, float(pos[0]), float(pos[1]),
+                        room, obs_x, obs_y,
                         float(heading), object_names, scene.summary,
                     )
                 else:
-                    spatial_memory.visit(room, float(pos[0]), float(pos[1]))
+                    spatial_memory.visit(room, obs_x, obs_y)
                     spatial_memory.observe(room, object_names, scene.summary)
             except Exception as exc:
                 logger.warning("[LOOK] spatial_memory update failed: %s", exc)

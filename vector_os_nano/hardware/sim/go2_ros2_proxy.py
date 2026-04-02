@@ -29,6 +29,7 @@ class Go2ROS2Proxy:
         self._connected: bool = False
         self._last_odom: Any = None
         self._last_camera_frame: Any = None  # numpy (H, W, 3) uint8
+        self._last_depth_frame: Any = None   # numpy (H, W) float32 metres
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -63,17 +64,22 @@ class Go2ROS2Proxy:
             self._node.create_subscription(
                 Image, "/camera/image", self._camera_cb, reliable_qos
             )
+            self._node.create_subscription(
+                Image, "/camera/depth", self._depth_cb, reliable_qos
+            )
 
             # Scene graph marker publisher (agent sets self._scene_graph)
             self._scene_graph = None
             self._nav_goal: tuple[float, float] | None = None
             self._trajectory: list[tuple[float, float]] = []
+            self._last_marker_hash: int | None = None
+            self._last_marker_publish_time: float = 0.0
             try:
                 from visualization_msgs.msg import MarkerArray
                 self._marker_pub = self._node.create_publisher(
                     MarkerArray, "/scene_graph_markers", 5
                 )
-                self._node.create_timer(1.0, self._publish_markers)
+                self._node.create_timer(3.0, self._publish_markers)
             except ImportError:
                 self._marker_pub = None
 
@@ -132,6 +138,19 @@ class Go2ROS2Proxy:
         except Exception:
             pass
 
+    def _depth_cb(self, msg: Any) -> None:
+        """Cache latest depth frame from /camera/depth (32FC1 240x320).
+
+        Bridge publishes depth as 32FC1 (float32, single channel) in metres.
+        """
+        try:
+            import numpy as np
+            frame = np.frombuffer(msg.data, dtype=np.float32)
+            frame = frame.reshape((msg.height, msg.width))
+            self._last_depth_frame = frame
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # State accessors
     # ------------------------------------------------------------------
@@ -154,6 +173,24 @@ class Go2ROS2Proxy:
         if self._last_camera_frame is not None:
             return self._last_camera_frame.copy()
         return np.zeros((height, width, 3), dtype=np.uint8)
+
+    def get_depth_frame(self, width: int = 320, height: int = 240) -> Any:
+        """Return latest depth frame as (H, W) float32 array in metres.
+
+        Received from /camera/depth topic (32FC1) published by Go2VNavBridge.
+        Returns a zero frame if no depth has been received yet.
+        """
+        import numpy as np
+        if self._last_depth_frame is not None:
+            return self._last_depth_frame.copy()
+        return np.zeros((height, width), dtype=np.float32)
+
+    def get_rgbd_frame(self, width: int = 320, height: int = 240) -> Any:
+        """Return aligned (rgb, depth) tuple.
+
+        Sim-to-real compatible: same interface as MuJoCoGo2.get_rgbd_frame().
+        """
+        return self.get_camera_frame(width, height), self.get_depth_frame(width, height)
 
     def get_odometry(self) -> Any:
         """Return latest Odometry data as a types.Odometry dataclass."""
@@ -216,11 +253,40 @@ class Go2ROS2Proxy:
         self.set_velocity(0.0, 0.0, 0.0)
         time.sleep(duration)
 
+    def _scene_graph_hash(self) -> int:
+        """Compute a lightweight hash of the current scene graph state.
+
+        Combines rooms count, viewpoints count, objects count, and robot
+        position rounded to 0.5 m grid so minor drift does not trigger
+        a re-publish.  Returns 0 when no scene graph is available.
+        """
+        sg = self._scene_graph
+        rooms_count = 0
+        vp_count = 0
+        obj_count = 0
+        if sg is not None:
+            try:
+                rooms = sg.get_all_rooms()
+                rooms_count = len(list(rooms))
+                for room in sg.get_all_rooms():
+                    vp_count += len(sg.get_viewpoints_in_room(room.room_id))
+                    obj_count += len(sg.find_objects_in_room(room.room_id))
+            except Exception:
+                pass
+        pos = self._position
+        rx = round(pos[0] / 0.5)
+        ry = round(pos[1] / 0.5)
+        return hash((rooms_count, vp_count, obj_count, rx, ry))
+
     def _publish_markers(self) -> None:
-        """Publish scene graph visualization as MarkerArray at 1 Hz.
+        """Publish scene graph visualization as MarkerArray at 3 Hz.
 
         Records current position into trajectory history on every call.
         Caps trajectory at 200 entries to avoid unbounded memory growth.
+
+        Only rebuilds and publishes the MarkerArray when the scene graph
+        state hash changes, or every 10 seconds as a keep-alive fallback.
+        This prevents unnecessary RViz re-renders that cause flickering.
         """
         if self._marker_pub is None:
             return
@@ -230,10 +296,20 @@ class Go2ROS2Proxy:
                 _TRAJECTORY_MAX_POINTS,
             )
             pos = self._position
-            # Append current 2D position to trajectory
+            # Always record trajectory (position history should be continuous)
             self._trajectory.append((pos[0], pos[1]))
             if len(self._trajectory) > _TRAJECTORY_MAX_POINTS:
                 del self._trajectory[: len(self._trajectory) - _TRAJECTORY_MAX_POINTS]
+
+            # Decide whether to publish: state changed OR 10 s fallback
+            now = time.time()
+            current_hash = self._scene_graph_hash()
+            elapsed = now - self._last_marker_publish_time
+            state_changed = current_hash != self._last_marker_hash
+            fallback_due = elapsed >= 10.0
+
+            if not (state_changed or fallback_due):
+                return
 
             ma = build_scene_graph_markers(
                 scene_graph=self._scene_graph,
@@ -245,5 +321,7 @@ class Go2ROS2Proxy:
             )
             if ma is not None:
                 self._marker_pub.publish(ma)
+                self._last_marker_hash = current_hash
+                self._last_marker_publish_time = now
         except Exception:
             pass

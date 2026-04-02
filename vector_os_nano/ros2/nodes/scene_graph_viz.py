@@ -156,7 +156,8 @@ def _base_marker(header: Any, ns: str, mid: int, mtype: int) -> Any:
     m.id = mid
     m.type = mtype
     m.action = _Marker.ADD
-    m.lifetime.sec = 0
+    m.frame_locked = False
+    m.lifetime.sec = 5
     m.lifetime.nanosec = 0
     return m
 
@@ -359,47 +360,48 @@ def _compute_object_position(
 ) -> tuple[float, float]:
     """Compute world position for an object marker.
 
-    Strategy (in priority order):
-    1. Project from the viewpoint that first saw this object: place
-       at distance 1.5-2.5m along the viewpoint's heading direction,
-       with objects fanned out within the FOV.
-    2. Fall back to room center if no viewpoint data is available.
+    Strategy (priority order):
+    1. Use obj.x / obj.y if non-zero — these come from depth projection
+       (D435 RGBD camera → project_center_to_world). Most accurate.
+    2. Project from viewpoint heading — when depth isn't available but
+       we know where the robot was looking.
+    3. Fall back to room center circular arrangement.
 
-    The result is clamped inside the room boundary so markers never
-    appear outside the walls.
+    Result is always clamped inside the room boundary.
     """
-    # Try to get the viewpoint that observed this object
-    vp = None
-    if obj.viewpoint_ids and scene_graph is not None:
-        for vp_id in obj.viewpoint_ids:
-            vps = scene_graph._viewpoints.get(vp_id)
-            if vps is not None:
-                vp = vps
-                break
-
     bounds = _ROOM_BOUNDS.get(room_id)
     margin = 0.5
+    ox, oy = 0.0, 0.0
 
-    if vp is not None and (vp.x != 0.0 or vp.y != 0.0):
-        # Project along the viewpoint's heading direction.
-        # Fan objects within the FOV cone so they don't overlap.
-        half_fov = math.radians(_VIEWPOINT_FOV_DEG / 2)
-        if total_objs > 1:
-            # Spread across FOV: from -half_fov to +half_fov
-            angle_offset = -half_fov + (2 * half_fov) * obj_index / (total_objs - 1)
-        else:
-            angle_offset = 0.0
-        direction = vp.heading + angle_offset
-        dist = 1.8 + 0.3 * (obj_index % 3)  # stagger depth slightly
-
-        ox = vp.x + dist * math.cos(direction)
-        oy = vp.y + dist * math.sin(direction)
+    # Priority 1: depth-projected position stored in ObjectNode
+    if obj.x != 0.0 or obj.y != 0.0:
+        ox, oy = obj.x, obj.y
     else:
-        # No viewpoint — use room center with circular arrangement
-        cx, cy = _ROOM_CENTERS.get(room_id, (0.0, 0.0))
-        angle = obj_index * 2 * math.pi / max(total_objs, 1)
-        ox = cx + 1.2 * math.cos(angle)
-        oy = cy + 1.2 * math.sin(angle)
+        # Priority 2: project from viewpoint heading
+        vp = None
+        if obj.viewpoint_ids and scene_graph is not None:
+            for vp_id in obj.viewpoint_ids:
+                vps = scene_graph._viewpoints.get(vp_id)
+                if vps is not None:
+                    vp = vps
+                    break
+
+        if vp is not None and (vp.x != 0.0 or vp.y != 0.0):
+            half_fov = math.radians(_VIEWPOINT_FOV_DEG / 2)
+            if total_objs > 1:
+                angle_offset = -half_fov + (2 * half_fov) * obj_index / (total_objs - 1)
+            else:
+                angle_offset = 0.0
+            direction = vp.heading + angle_offset
+            dist = 1.8 + 0.3 * (obj_index % 3)
+            ox = vp.x + dist * math.cos(direction)
+            oy = vp.y + dist * math.sin(direction)
+        else:
+            # Priority 3: room center fallback
+            cx, cy = _ROOM_CENTERS.get(room_id, (0.0, 0.0))
+            angle = obj_index * 2 * math.pi / max(total_objs, 1)
+            ox = cx + 1.2 * math.cos(angle)
+            oy = cy + 1.2 * math.sin(angle)
 
     # Clamp inside room bounds
     if bounds:

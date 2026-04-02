@@ -368,7 +368,7 @@ Visualization Manager:
         Value: /explored_areas
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:

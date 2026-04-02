@@ -1,12 +1,12 @@
 # Vector OS Nano SDK — Progress
 
 **Last updated:** 2026-04-02
-**Version:** v0.8.0-dev
+**Version:** v0.9.0-dev
 **Branch:** master
 
 ---
 
-## Current: Go2 RGBD Perception + Depth-Based Object Mapping
+## Current: GroundingDINO Object Detection + RGBD Positioning
 
 ### Sensor Configuration (sim-to-real)
 ```
@@ -60,16 +60,31 @@ RViz Visualization (anti-flicker: 3s interval, 5s lifetime):
 ### Object Positioning Pipeline (sim-to-real)
 ```
 D435 RGBD camera
-  ├── RGB → VLM (GPT-4o) → "saw: sofa, table, lamp"
-  └── Depth → center_depth(median 20% center) → 2.3m
+  ├── RGB → GroundingDINO → per-object bbox (u1,v1,u2,v2)  [IN PROGRESS]
+  │         "sofa" at (50,80,200,180), "table" at (220,90,300,170)
+  │
+  └── Depth → depth at each bbox center → per-object metric depth
                   ↓
-      project_center_to_world(depth, D435_intrinsics, robot_pose)
+      depth_to_world(bbox_center, depth, D435_intrinsics, robot_pose)
                   ↓
-      ObjectNode(x=4.2, y=1.8)  ← world coordinates
+      ObjectNode(label="sofa", x=2.1, y=1.3)  ← accurate per-object position
+      ObjectNode(label="table", x=3.8, y=2.0)
                   ↓
-      RViz marker at (4.2, 1.8)  ← accurate placement
+      RViz markers at correct world locations
+
+Current (until GroundingDINO integration complete):
+  RGB → VLM (gpt-4o-mini) → object names (no positions)
+  Objects clustered ~2m in front of viewpoint heading
 ```
-Fallback chain: depth projection → viewpoint heading fan → room center.
+
+### GroundingDINO Integration Status
+- [x] object_detector.py module created (detect_objects + detect_and_project)
+- [x] D435 depth_projection.py (pixel→camera→world transforms)
+- [ ] Install torch + transformers in .venv-nano (running)
+- [ ] Test GroundingDINO model loading + inference on MuJoCo frames
+- [ ] Wire into LookSkill: replace VLM object list with GroundingDINO detections
+- [ ] Wire into auto-look: per-object positioning during exploration
+- [ ] Harness tests: L14 detection + projection accuracy
 
 ### Harness Results
 | Suite | Result | Details |
@@ -94,7 +109,9 @@ Fallback chain: depth projection → viewpoint heading fan → room center.
 | Depth Projection (L13) | **24/24** | D435 intrinsics, pixel→world, center_depth |
 | **Total harness** | **280+** | 0 collection errors |
 
-### What's New (v0.8.0-dev)
+### What's New (v0.9.0-dev)
+- **GroundingDINO Integration (in progress)**: Open-vocabulary object detector for per-object bounding boxes + depth → accurate world positioning. Model: grounding-dino-tiny on RTX 5080.
+- **VLM Fix**: Switched to gpt-4o-mini + image resize to 160px (was timing out on OpenRouter with large base64). 1-2s response now.
 - **RealSense D435 RGBD Simulation**: MuJoCoGo2 renders aligned RGB+depth via MuJoCo depth renderer. Same `get_rgbd_frame()` interface for sim and real.
 - **Depth-Based Object Positioning**: Objects placed at world coordinates computed from D435 depth + camera intrinsics + robot pose. Replaces heading-based guessing.
 - **depth_projection.py**: D435 intrinsics, `pixel_to_camera()`, `camera_to_world()`, `center_depth()`, `project_center_to_world()`. Sim-to-real compatible.

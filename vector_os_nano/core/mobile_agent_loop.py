@@ -215,15 +215,18 @@ class MobileAgentLoop:
     # ------------------------------------------------------------------
 
     def _plan(self, goal: str) -> list[SubTask]:
-        """Ask LLM to decompose goal into sub-tasks."""
+        """Ask LLM to decompose goal into sub-tasks.
+
+        Calls agent._llm.chat() with the planning prompt + goal.
+        Falls back to empty plan on any error (caller uses _fallback_plan).
+        """
         agent = self._agent
         if agent._llm is None:
             return []
 
-        # Build memory context
+        # Build memory context from SceneGraph/SpatialMemory
         memory_ctx = ""
         try:
-            from vector_os_nano.core.spatial_memory import SpatialMemory
             sm = getattr(agent, "_spatial_memory", None)
             if sm is not None:
                 memory_ctx = f"Spatial memory:\n{sm.get_room_summary()}"
@@ -233,13 +236,13 @@ class MobileAgentLoop:
         prompt = _PLAN_PROMPT.format(memory_context=memory_ctx)
 
         try:
-            result = agent._llm.chat(
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": goal},
-                ],
+            # ClaudeProvider.chat(user_message, system_prompt, history, ...)
+            text = agent._llm.chat(
+                user_message=goal,
+                system_prompt=prompt,
             )
-            text = result if isinstance(result, str) else str(result)
+            if not isinstance(text, str):
+                text = str(text)
             return self._parse_plan(text)
         except Exception as exc:
             logger.warning("[MobileLoop] LLM planning failed: %s", exc)
@@ -374,6 +377,9 @@ class MobileAgentLoop:
     def _auto_observe(self, context: Any) -> str:
         """Capture scene via VLM after arriving at a new location.
 
+        Uses SceneGraph.observe_with_viewpoint when available for
+        full viewpoint-aware recording with position and heading.
+
         Returns scene description string, or empty string on failure.
         """
         vlm = getattr(self._agent, "_vlm", None)
@@ -385,12 +391,20 @@ class MobileAgentLoop:
             frame = base.get_camera_frame()
             scene = vlm.describe_scene(frame)
             room_id = vlm.identify_room(frame)
+            obj_names = [o.name for o in scene.objects]
 
-            # Record in spatial memory
+            # Record in spatial memory / scene graph
             sm = getattr(self._agent, "_spatial_memory", None)
             if sm is not None:
-                obj_names = [o.name for o in scene.objects]
-                sm.observe(room_id.room, obj_names, scene.summary)
+                pos = base.get_position()
+                heading = base.get_heading()
+                if hasattr(sm, "observe_with_viewpoint"):
+                    sm.observe_with_viewpoint(
+                        room_id.room, float(pos[0]), float(pos[1]),
+                        float(heading), obj_names, scene.summary,
+                    )
+                else:
+                    sm.observe(room_id.room, obj_names, scene.summary)
 
             logger.info(
                 "[MobileLoop] Auto-observe: room=%s objects=%s",

@@ -113,6 +113,7 @@ _explore_visited: set[str] = set()
 _explore_running: bool = False
 _tare_proc: subprocess.Popen | None = None
 _on_event: Any = None  # callback(event_type: str, data: dict) — set by CLI
+_auto_look: Any = None  # callback(room: str) -> dict | None — VLM look on new room
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +147,17 @@ def set_event_callback(callback: Any) -> None:
     """
     global _on_event
     _on_event = callback
+
+
+def set_auto_look(callback: Any) -> None:
+    """Set auto-look callback, invoked when exploration enters a new room.
+
+    callback(room: str) -> dict | None
+        Returns VLM observation data dict or None on failure.
+        Called from the background exploration thread — must be thread-safe.
+    """
+    global _auto_look
+    _auto_look = callback
 
 
 def _emit(event_type: str, data: dict | None = None) -> None:
@@ -310,6 +322,26 @@ def _exploration_loop(base: Any, has_bridge: bool = True) -> None:
                         "all_rooms": sorted(_explore_visited),
                     })
 
+                    # Auto-look: VLM scene capture at each new room
+                    if _auto_look is not None:
+                        try:
+                            obs = _auto_look(room)
+                            if obs:
+                                _emit("room_observed", {
+                                    "room": room,
+                                    "summary": obs.get("summary", ""),
+                                    "objects": obs.get("objects", []),
+                                })
+                                logger.info(
+                                    "[EXPLORE] Auto-look %s: %s",
+                                    room, obs.get("summary", "")[:80],
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "[EXPLORE] Auto-look failed for %s: %s",
+                                room, exc,
+                            )
+
             except Exception:
                 pass
 
@@ -375,6 +407,44 @@ class ExploreSkill:
             )
 
         base = context.base
+
+        # Wire auto-look if VLM + camera are available
+        vlm = context.services.get("vlm")
+        spatial_memory = context.services.get("spatial_memory")
+        if vlm is not None:
+            def _do_auto_look(room: str) -> dict | None:
+                """Capture frame, run VLM, record to scene graph."""
+                try:
+                    frame = base.get_camera_frame()
+                    scene = vlm.describe_scene(frame)
+                    room_id = vlm.identify_room(frame)
+                    detected_room = room_id.room if room_id.room != "unknown" else room
+
+                    obj_names = [o.name for o in scene.objects]
+                    if spatial_memory is not None:
+                        pos = base.get_position()
+                        heading = base.get_heading()
+                        if hasattr(spatial_memory, "observe_with_viewpoint"):
+                            spatial_memory.observe_with_viewpoint(
+                                detected_room, float(pos[0]), float(pos[1]),
+                                float(heading), obj_names, scene.summary,
+                            )
+                        else:
+                            spatial_memory.visit(detected_room, float(pos[0]), float(pos[1]))
+                            spatial_memory.observe(detected_room, obj_names, scene.summary)
+
+                    return {
+                        "room": detected_room,
+                        "summary": scene.summary,
+                        "objects": [{"name": o.name, "confidence": o.confidence}
+                                    for o in scene.objects],
+                        "room_confidence": room_id.confidence,
+                    }
+                except Exception as exc:
+                    logger.warning("[EXPLORE] auto-look VLM error: %s", exc)
+                    return None
+
+            set_auto_look(_do_auto_look)
 
         # Ensure bridge + nav stack are running
         bridge_ok = _start_bridge_on_go2(base)

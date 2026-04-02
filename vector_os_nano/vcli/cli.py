@@ -408,10 +408,22 @@ def _init_agent(args: argparse.Namespace) -> Any:
             except Exception:
                 agent._vlm = None
 
-        # Scene graph (SysNav-style)
+        # Scene graph (SysNav-style) with persistence
+        import os as _os
         from vector_os_nano.core.scene_graph import SceneGraph
-        agent._spatial_memory = SceneGraph()
-        console.print(f"[dim]  Memory: scene graph (rooms -> viewpoints -> objects)[/dim]")
+        _sg_path = _os.path.expanduser("~/.vector_os_nano/scene_graph.yaml")
+        _os.makedirs(_os.path.dirname(_sg_path), exist_ok=True)
+        _sg = SceneGraph(persist_path=_sg_path)
+        _sg.load()
+        _sg_stats = _sg.stats()
+        if _sg_stats["rooms"] > 0:
+            console.print(
+                f"[dim]  Memory: scene graph restored "
+                f"({_sg_stats['rooms']} rooms, {_sg_stats['objects']} objects)[/dim]"
+            )
+        else:
+            console.print(f"[dim]  Memory: scene graph (rooms -> viewpoints -> objects)[/dim]")
+        agent._spatial_memory = _sg
 
         # ROS2 bridge + nav stack (background)
         try:
@@ -1156,6 +1168,20 @@ def main(argv: list[str] | None = None) -> None:
     finally:
         session.save()
         console.print(f"[dim]Session saved: {session.session_id}[/dim]")
+        # Persist scene graph if agent has one
+        _agent_final = app_state.get("agent")
+        if _agent_final is not None:
+            _sm = getattr(_agent_final, "_spatial_memory", None)
+            if _sm is not None and hasattr(_sm, "save") and hasattr(_sm, "stats"):
+                try:
+                    _sm.save()
+                    _sm_stats = _sm.stats()
+                    console.print(
+                        f"[dim]Scene graph saved: "
+                        f"{_sm_stats['rooms']} rooms, {_sm_stats['objects']} objects[/dim]"
+                    )
+                except Exception as _exc:
+                    console.print(f"[yellow]Scene graph save failed: {_exc}[/yellow]")
 
 
 if __name__ == "__main__":

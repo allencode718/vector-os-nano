@@ -402,9 +402,22 @@ def _init_sim_go2(cfg: dict, gui: bool = False) -> tuple:
 # Cleanup helper
 # ---------------------------------------------------------------------------
 
-def _shutdown(arm, perception, base=None) -> None:
+def _shutdown(arm, perception, base=None, agent=None) -> None:
     """Disconnect hardware gracefully."""
     print("Shutting down...")
+    # Persist scene graph before disconnecting hardware
+    if agent is not None:
+        _sm = getattr(agent, "_spatial_memory", None)
+        if _sm is not None and hasattr(_sm, "save") and hasattr(_sm, "stats"):
+            try:
+                _sm.save()
+                _sm_stats = _sm.stats()
+                print(
+                    f"Scene graph saved: "
+                    f"{_sm_stats['rooms']} rooms, {_sm_stats['objects']} objects"
+                )
+            except Exception as exc:
+                logger.warning("Scene graph save failed: %s", exc)
     if perception is not None and hasattr(perception, "stop_continuous_tracking"):
         try:
             perception.stop_continuous_tracking()
@@ -862,10 +875,21 @@ def main() -> None:
         else:
             agent._vlm = None
 
-        # Initialize scene graph (SysNav-inspired three-layer spatial memory)
+        # Initialize scene graph (SysNav-inspired three-layer spatial memory) with persistence
         from vector_os_nano.core.scene_graph import SceneGraph
-        agent._spatial_memory = SceneGraph()
-        print("Memory    : scene graph initialized (rooms -> viewpoints -> objects)")
+        _sg_path = os.path.expanduser("~/.vector_os_nano/scene_graph.yaml")
+        os.makedirs(os.path.dirname(_sg_path), exist_ok=True)
+        _sg = SceneGraph(persist_path=_sg_path)
+        _sg.load()
+        _sg_stats = _sg.stats()
+        if _sg_stats["rooms"] > 0:
+            print(
+                f"Memory    : scene graph restored "
+                f"({_sg_stats['rooms']} rooms, {_sg_stats['objects']} objects)"
+            )
+        else:
+            print("Memory    : scene graph initialized (rooms -> viewpoints -> objects)")
+        agent._spatial_memory = _sg
 
         # Visualization: RViz markers (published when ROS2 bridge is active)
 
@@ -905,7 +929,7 @@ def main() -> None:
         else:
             _run_cli(agent, perception, verbose=args.verbose)
     finally:
-        _shutdown(arm, perception, base=base)
+        _shutdown(arm, perception, base=base, agent=agent)
 
 
 def main_dashboard() -> None:

@@ -66,6 +66,8 @@ class Go2ROS2Proxy:
 
             # Scene graph marker publisher (agent sets self._scene_graph)
             self._scene_graph = None
+            self._nav_goal: tuple[float, float] | None = None
+            self._trajectory: list[tuple[float, float]] = []
             try:
                 from visualization_msgs.msg import MarkerArray
                 self._marker_pub = self._node.create_publisher(
@@ -215,16 +217,31 @@ class Go2ROS2Proxy:
         time.sleep(duration)
 
     def _publish_markers(self) -> None:
-        """Publish scene graph visualization as MarkerArray at 1 Hz."""
-        if self._marker_pub is None or self._scene_graph is None:
+        """Publish scene graph visualization as MarkerArray at 1 Hz.
+
+        Records current position into trajectory history on every call.
+        Caps trajectory at 200 entries to avoid unbounded memory growth.
+        """
+        if self._marker_pub is None:
             return
         try:
-            from vector_os_nano.ros2.nodes.scene_graph_viz import build_scene_graph_markers
+            from vector_os_nano.ros2.nodes.scene_graph_viz import (
+                build_scene_graph_markers,
+                _TRAJECTORY_MAX_POINTS,
+            )
             pos = self._position
+            # Append current 2D position to trajectory
+            self._trajectory.append((pos[0], pos[1]))
+            if len(self._trajectory) > _TRAJECTORY_MAX_POINTS:
+                del self._trajectory[: len(self._trajectory) - _TRAJECTORY_MAX_POINTS]
+
             ma = build_scene_graph_markers(
                 scene_graph=self._scene_graph,
-                robot_x=pos[0], robot_y=pos[1],
+                robot_x=pos[0],
+                robot_y=pos[1],
                 robot_heading=self._heading,
+                nav_goal=self._nav_goal,
+                trajectory=self._trajectory,
             )
             if ma is not None:
                 self._marker_pub.publish(ma)

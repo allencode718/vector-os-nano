@@ -496,11 +496,16 @@ Visualization Manager:
       Name: SceneGraph
       Namespaces:
         nav_goal: true
+        nav_goal_label: true
         object_labels: true
         objects: true
         robot: true
+        robot_body: true
+        room_borders: true
         room_labels: true
         rooms: true
+        trajectory: true
+        viewpoint_fovs: true
         viewpoints: true
       Topic:
         Depth: 5

@@ -174,9 +174,21 @@ class SimStartTool:
             except Exception:
                 agent._vlm = None
 
-        # Scene graph — also attach to proxy for RViz marker publishing
+        # Scene graph — persistent, also attach to proxy for RViz marker publishing
+        import os as _os
         from vector_os_nano.core.scene_graph import SceneGraph
-        agent._spatial_memory = SceneGraph()
+        _persist_path = _os.path.expanduser("~/.vector_os_nano/scene_graph.yaml")
+        _os.makedirs(_os.path.dirname(_persist_path), exist_ok=True)
+        sg = SceneGraph(persist_path=_persist_path)
+        sg.load()
+        _stats = sg.stats()
+        if _stats["rooms"] > 0:
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                "[SceneGraph] restored %d rooms, %d objects from %s",
+                _stats["rooms"], _stats["objects"], _persist_path,
+            )
+        agent._spatial_memory = sg
         base._scene_graph = agent._spatial_memory
 
         return agent

@@ -3,13 +3,20 @@
 Publishes to /scene_graph_markers (visualization_msgs/MarkerArray) at 1 Hz.
 Designed to be embedded in the Go2VNavBridge node or run standalone.
 
-Marker types:
-    - Room boundaries: LineStrip (colored per room)
-    - Room labels: Text at room centers (with visit count + coverage)
-    - Viewpoints: Sphere (green) at observation positions
-    - Objects: Cube (orange) with text labels
-    - Robot trail: Sphere (teal) at current position
-    - Navigation goal: Arrow (red)
+Marker namespaces
+-----------------
+    rooms           -- filled CUBE rectangles, one per room (8 total)
+    room_borders    -- LINE_STRIP outlines for each room boundary
+    room_labels     -- TEXT_VIEW_FACING, one per room (8 total)
+    viewpoints      -- SPHERE at each observation position (teal/green)
+    viewpoint_fovs  -- TRIANGLE_LIST fan shapes showing camera FOV direction
+    objects         -- CUBE for each detected ObjectNode (category-colored)
+    object_labels   -- TEXT_VIEW_FACING for each ObjectNode
+    robot           -- ARROW at current robot position (teal, prominent)
+    robot_body      -- CYLINDER showing robot footprint
+    trajectory      -- LINE_STRIP showing robot path history
+    nav_goal        -- CYLINDER (pulsing red/coral) at navigation target
+    nav_goal_label  -- TEXT_VIEW_FACING showing "GOAL" above the cylinder
 
 All markers are in the "map" frame.
 """
@@ -51,7 +58,10 @@ def _ensure_imports() -> bool:
         return False
 
 
-# Room boundaries (matches go2_room.xml)
+# ---------------------------------------------------------------------------
+# Room layout (matches go2_room.xml)
+# ---------------------------------------------------------------------------
+
 _ROOM_BOUNDS: dict[str, tuple[float, float, float, float]] = {
     "living_room":    (0.0,  0.0,  6.0,  5.0),
     "dining_room":    (0.0,  5.0,  6.0,  10.0),
@@ -74,17 +84,456 @@ _ROOM_CENTERS: dict[str, tuple[float, float]] = {
     "hallway":        (10.0, 5.0),
 }
 
-# RGBA colors per room (r, g, b, a) in [0, 1]
+# Apple-quality color palette — distinct, harmonious RGBA in [0, 1]
+# Alpha is the fill opacity for unvisited/visited states.
 _ROOM_COLORS: dict[str, tuple[float, float, float, float]] = {
-    "living_room":    (0.27, 0.51, 0.71, 0.3),
-    "dining_room":    (0.80, 0.52, 0.25, 0.3),
-    "kitchen":        (0.24, 0.70, 0.44, 0.3),
-    "study":          (0.58, 0.44, 0.86, 0.3),
-    "master_bedroom": (0.86, 0.44, 0.58, 0.3),
-    "guest_bedroom":  (1.00, 0.65, 0.00, 0.3),
-    "bathroom":       (0.00, 0.81, 0.82, 0.3),
-    "hallway":        (0.66, 0.66, 0.66, 0.2),
+    "living_room":    (0.20, 0.78, 0.78, 0.25),  # teal
+    "dining_room":    (1.00, 0.42, 0.42, 0.25),  # coral
+    "kitchen":        (0.60, 0.80, 0.40, 0.25),  # mint green
+    "study":          (0.72, 0.53, 0.94, 0.25),  # lavender
+    "master_bedroom": (1.00, 0.72, 0.30, 0.25),  # warm gold
+    "guest_bedroom":  (0.40, 0.76, 1.00, 0.25),  # sky blue
+    "bathroom":       (1.00, 0.60, 0.80, 0.25),  # soft pink
+    "hallway":        (0.75, 0.75, 0.75, 0.18),  # neutral grey
 }
+
+# Object category color palette — distinct saturated colors
+_OBJECT_COLORS: dict[str, tuple[float, float, float]] = {
+    "chair":       (1.00, 0.55, 0.00),  # orange
+    "sofa":        (0.20, 0.60, 1.00),  # blue
+    "fridge":      (0.40, 0.80, 0.40),  # green
+    "counter":     (0.90, 0.90, 0.20),  # yellow
+    "table":       (1.00, 0.40, 0.40),  # red
+    "desk":        (0.80, 0.50, 0.20),  # brown
+    "bed":         (0.60, 0.40, 0.80),  # purple
+    "lamp":        (1.00, 1.00, 0.40),  # bright yellow
+    "tv":          (0.20, 0.80, 0.80),  # cyan
+    "door":        (0.60, 0.60, 0.60),  # grey
+    "window":      (0.70, 0.85, 1.00),  # light blue
+    "plant":       (0.30, 0.70, 0.30),  # dark green
+}
+_OBJECT_COLOR_DEFAULT = (1.00, 0.55, 0.00)  # orange fallback
+
+# FOV cone parameters — matches scene_graph.py constants
+_VIEWPOINT_FOV_DEG: float = 60.0
+_VIEWPOINT_RANGE: float = 3.0
+_TRAJECTORY_MAX_POINTS: int = 200
+
+
+# ---------------------------------------------------------------------------
+# Helper builders
+# ---------------------------------------------------------------------------
+
+
+def _make_header(stamp: Any) -> Any:
+    h = _Header()
+    h.frame_id = "map"
+    h.stamp = stamp
+    return h
+
+
+def _make_point(x: float, y: float, z: float) -> Any:
+    p = _Point()
+    p.x = x
+    p.y = y
+    p.z = z
+    return p
+
+
+def _make_color(r: float, g: float, b: float, a: float) -> Any:
+    c = _ColorRGBA()
+    c.r = r
+    c.g = g
+    c.b = b
+    c.a = a
+    return c
+
+
+def _base_marker(header: Any, ns: str, mid: int, mtype: int) -> Any:
+    m = _Marker()
+    m.header = header
+    m.ns = ns
+    m.id = mid
+    m.type = mtype
+    m.action = _Marker.ADD
+    m.lifetime.sec = 0
+    m.lifetime.nanosec = 0
+    return m
+
+
+# ---------------------------------------------------------------------------
+# Section builders
+# ---------------------------------------------------------------------------
+
+
+def _build_room_markers(
+    header: Any,
+    scene_graph: Any,
+    start_id: int,
+) -> tuple[list[Any], int]:
+    """Build room fill (CUBE), border (LINE_STRIP), and label markers."""
+    markers: list[Any] = []
+    mid = start_id
+
+    for room_name, (x0, y0, x1, y1) in _ROOM_BOUNDS.items():
+        color = _ROOM_COLORS.get(room_name, (0.5, 0.5, 0.5, 0.25))
+        cx, cy = _ROOM_CENTERS[room_name]
+
+        # Determine visit/coverage state
+        is_visited = False
+        coverage = 0.0
+        visit_count = 0
+        n_objs = 0
+        if scene_graph is not None:
+            room_node = scene_graph.get_room(room_name)
+            if room_node and room_node.visit_count > 0:
+                is_visited = True
+                visit_count = room_node.visit_count
+                coverage = scene_graph.get_room_coverage(room_name)
+                n_objs = len(scene_graph.find_objects_in_room(room_name))
+
+        # --- Fill CUBE ---
+        fill = _base_marker(header, "rooms", mid, _Marker.CUBE)
+        mid += 1
+        fill.pose.position.x = (x0 + x1) / 2
+        fill.pose.position.y = (y0 + y1) / 2
+        fill.pose.position.z = 0.005
+        fill.pose.orientation.w = 1.0
+        fill.scale.x = x1 - x0
+        fill.scale.y = y1 - y0
+        fill.scale.z = 0.01
+        if is_visited:
+            alpha = 0.18 + coverage * 0.35  # 0.18 → 0.53 as coverage grows
+            fill.color = _make_color(color[0], color[1], color[2], alpha)
+        else:
+            fill.color = _make_color(0.35, 0.35, 0.35, 0.10)
+        markers.append(fill)
+
+        # --- Border LINE_STRIP ---
+        border = _base_marker(header, "room_borders", mid, _Marker.LINE_STRIP)
+        mid += 1
+        # Close the rectangle: 5 points (last == first)
+        corners = [
+            (x0, y0, 0.02), (x1, y0, 0.02),
+            (x1, y1, 0.02), (x0, y1, 0.02),
+            (x0, y0, 0.02),
+        ]
+        for bx, by, bz in corners:
+            border.points.append(_make_point(bx, by, bz))
+        if is_visited:
+            border.color = _make_color(color[0], color[1], color[2], 0.85)
+            border.scale.x = 0.06  # line width
+        else:
+            border.color = _make_color(0.5, 0.5, 0.5, 0.35)
+            border.scale.x = 0.03
+        markers.append(border)
+
+        # --- Room label TEXT_VIEW_FACING ---
+        label_text = _format_room_label(
+            room_name, is_visited, visit_count, coverage, n_objs
+        )
+        lbl = _base_marker(header, "room_labels", mid, _Marker.TEXT_VIEW_FACING)
+        mid += 1
+        lbl.pose.position.x = cx
+        lbl.pose.position.y = cy
+        lbl.pose.position.z = 0.6
+        lbl.pose.orientation.w = 1.0
+        lbl.text = label_text
+        lbl.scale.z = 0.45  # text height in metres
+        if is_visited:
+            lbl.color = _make_color(1.0, 1.0, 1.0, 0.95)
+        else:
+            lbl.color = _make_color(0.6, 0.6, 0.6, 0.60)
+        markers.append(lbl)
+
+    return markers, mid
+
+
+def _format_room_label(
+    room_name: str,
+    is_visited: bool,
+    visit_count: int,
+    coverage: float,
+    n_objs: int,
+) -> str:
+    """Format room label text with visit stats when available."""
+    if not is_visited:
+        return room_name
+    return f"{room_name}\n{visit_count}x | {coverage:.0%} | {n_objs} obj"
+
+
+def _build_viewpoint_markers(
+    header: Any,
+    scene_graph: Any,
+    start_id: int,
+) -> tuple[list[Any], int]:
+    """Build viewpoint sphere + FOV cone triangle-fan markers."""
+    markers: list[Any] = []
+    mid = start_id
+
+    if scene_graph is None:
+        return markers, mid
+
+    for room in scene_graph.get_all_rooms():
+        for vp in scene_graph.get_viewpoints_in_room(room.room_id):
+            # Sphere at viewpoint position
+            sphere = _base_marker(header, "viewpoints", mid, _Marker.SPHERE)
+            mid += 1
+            sphere.pose.position.x = vp.x
+            sphere.pose.position.y = vp.y
+            sphere.pose.position.z = 0.20
+            sphere.pose.orientation.w = 1.0
+            sphere.scale.x = 0.30
+            sphere.scale.y = 0.30
+            sphere.scale.z = 0.20
+            sphere.color = _make_color(0.00, 0.85, 0.65, 0.85)  # teal-green
+            markers.append(sphere)
+
+            # FOV cone as TRIANGLE_LIST fan
+            fov_marker = _build_fov_cone(
+                header, mid, vp.x, vp.y, vp.heading,
+                _VIEWPOINT_FOV_DEG, _VIEWPOINT_RANGE,
+            )
+            if fov_marker is not None:
+                mid += 1
+                markers.append(fov_marker)
+
+    return markers, mid
+
+
+def _build_fov_cone(
+    header: Any,
+    mid: int,
+    x: float,
+    y: float,
+    heading: float,
+    fov_deg: float,
+    range_m: float,
+    n_segments: int = 8,
+) -> Any:
+    """Build a TRIANGLE_LIST fan showing a camera FOV cone in 2D (flat on z=0.05)."""
+    cone = _base_marker(header, "viewpoint_fovs", mid, _Marker.TRIANGLE_LIST)
+    cone.pose.position.x = 0.0
+    cone.pose.position.y = 0.0
+    cone.pose.position.z = 0.0
+    cone.pose.orientation.w = 1.0
+    cone.scale.x = 1.0
+    cone.scale.y = 1.0
+    cone.scale.z = 1.0
+    cone.color = _make_color(0.00, 0.85, 0.65, 0.22)  # transparent teal
+
+    half_fov = math.radians(fov_deg / 2)
+    z_flat = 0.05
+
+    apex = _make_point(x, y, z_flat)
+
+    # Fan of n_segments triangles from apex to arc
+    for i in range(n_segments):
+        t0 = heading - half_fov + (2 * half_fov * i / n_segments)
+        t1 = heading - half_fov + (2 * half_fov * (i + 1) / n_segments)
+        p0 = _make_point(
+            x + range_m * math.cos(t0),
+            y + range_m * math.sin(t0),
+            z_flat,
+        )
+        p1 = _make_point(
+            x + range_m * math.cos(t1),
+            y + range_m * math.sin(t1),
+            z_flat,
+        )
+        cone.points.append(apex)
+        cone.points.append(p0)
+        cone.points.append(p1)
+
+    if not cone.points:
+        return None
+    return cone
+
+
+def _build_object_markers(
+    header: Any,
+    scene_graph: Any,
+    start_id: int,
+) -> tuple[list[Any], int]:
+    """Build object cube + label markers, with category-based colors."""
+    markers: list[Any] = []
+    mid = start_id
+
+    if scene_graph is None:
+        return markers, mid
+
+    for room in scene_graph.get_all_rooms():
+        objs = scene_graph.find_objects_in_room(room.room_id)
+        cx, cy = room.center_x, room.center_y
+        n = max(len(objs), 1)
+
+        for i, obj in enumerate(objs):
+            angle = i * 2 * math.pi / n
+            ox = cx + 0.85 * math.cos(angle)
+            oy = cy + 0.85 * math.sin(angle)
+
+            cat_lower = obj.category.lower()
+            r, g, b = _OBJECT_COLORS.get(cat_lower, _OBJECT_COLOR_DEFAULT)
+
+            # Cube
+            cube = _base_marker(header, "objects", mid, _Marker.CUBE)
+            mid += 1
+            cube.pose.position.x = ox
+            cube.pose.position.y = oy
+            cube.pose.position.z = 0.15
+            cube.pose.orientation.w = 1.0
+            cube.scale.x = 0.28
+            cube.scale.y = 0.28
+            cube.scale.z = 0.28
+            cube.color = _make_color(r, g, b, 0.88)
+            markers.append(cube)
+
+            # Label — offset above the cube
+            lbl = _base_marker(header, "object_labels", mid, _Marker.TEXT_VIEW_FACING)
+            mid += 1
+            lbl.pose.position.x = ox
+            lbl.pose.position.y = oy
+            lbl.pose.position.z = 0.50
+            lbl.pose.orientation.w = 1.0
+            lbl.text = obj.category
+            lbl.scale.z = 0.22
+            lbl.color = _make_color(1.0, 1.0, 1.0, 0.95)
+            markers.append(lbl)
+
+    return markers, mid
+
+
+def _build_robot_markers(
+    header: Any,
+    robot_x: float,
+    robot_y: float,
+    robot_heading: float,
+    start_id: int,
+) -> tuple[list[Any], int]:
+    """Build robot arrow + footprint cylinder."""
+    markers: list[Any] = []
+    mid = start_id
+
+    qz = math.sin(robot_heading / 2)
+    qw = math.cos(robot_heading / 2)
+
+    # Main direction arrow — prominent teal
+    arrow = _base_marker(header, "robot", mid, _Marker.ARROW)
+    mid += 1
+    arrow.pose.position.x = robot_x
+    arrow.pose.position.y = robot_y
+    arrow.pose.position.z = 0.25
+    arrow.pose.orientation.z = qz
+    arrow.pose.orientation.w = qw
+    arrow.scale.x = 0.80   # arrow length
+    arrow.scale.y = 0.20   # shaft diameter
+    arrow.scale.z = 0.20   # head diameter
+    arrow.color = _make_color(0.00, 0.82, 0.82, 1.00)  # bright teal
+    markers.append(arrow)
+
+    # Footprint cylinder — slightly larger, semi-transparent
+    body = _base_marker(header, "robot_body", mid, _Marker.CYLINDER)
+    mid += 1
+    body.pose.position.x = robot_x
+    body.pose.position.y = robot_y
+    body.pose.position.z = 0.12
+    body.pose.orientation.w = 1.0
+    body.scale.x = 0.55   # diameter
+    body.scale.y = 0.55
+    body.scale.z = 0.24   # height
+    body.color = _make_color(0.00, 0.82, 0.82, 0.25)
+    markers.append(body)
+
+    return markers, mid
+
+
+def _build_trajectory_marker(
+    header: Any,
+    trajectory: list[tuple[float, float]],
+    start_id: int,
+) -> tuple[list[Any], int]:
+    """Build trajectory LINE_STRIP from position history."""
+    markers: list[Any] = []
+    mid = start_id
+
+    if len(trajectory) < 2:
+        return markers, mid
+
+    line = _base_marker(header, "trajectory", mid, _Marker.LINE_STRIP)
+    mid += 1
+    line.pose.orientation.w = 1.0
+    line.scale.x = 0.06  # line width
+
+    n = len(trajectory)
+    for idx, (px, py) in enumerate(trajectory):
+        # Color fades from grey-blue (old) to bright teal (recent)
+        t = idx / max(n - 1, 1)  # 0.0 (oldest) → 1.0 (newest)
+        r = 0.20 * (1 - t) + 0.00 * t
+        g = 0.50 * (1 - t) + 0.82 * t
+        b = 0.70 * (1 - t) + 0.82 * t
+        a = 0.30 + 0.60 * t  # fade in toward present
+        line.points.append(_make_point(px, py, 0.03))
+        line.colors.append(_make_color(r, g, b, a))
+
+    markers.append(line)
+    return markers, mid
+
+
+def _build_nav_goal_markers(
+    header: Any,
+    nav_goal: tuple[float, float],
+    start_id: int,
+) -> tuple[list[Any], int]:
+    """Build nav goal cylinder + GOAL text label."""
+    markers: list[Any] = []
+    mid = start_id
+
+    gx, gy = nav_goal
+
+    # Tall cylinder — acts as beacon
+    cyl = _base_marker(header, "nav_goal", mid, _Marker.CYLINDER)
+    mid += 1
+    cyl.pose.position.x = gx
+    cyl.pose.position.y = gy
+    cyl.pose.position.z = 0.60
+    cyl.pose.orientation.w = 1.0
+    cyl.scale.x = 0.40
+    cyl.scale.y = 0.40
+    cyl.scale.z = 1.20  # tall beacon
+    cyl.color = _make_color(1.00, 0.20, 0.20, 0.85)  # bold red
+    markers.append(cyl)
+
+    # Ring disc at base
+    disc = _base_marker(header, "nav_goal", mid, _Marker.CYLINDER)
+    mid += 1
+    disc.pose.position.x = gx
+    disc.pose.position.y = gy
+    disc.pose.position.z = 0.01
+    disc.pose.orientation.w = 1.0
+    disc.scale.x = 0.80
+    disc.scale.y = 0.80
+    disc.scale.z = 0.02
+    disc.color = _make_color(1.00, 0.20, 0.20, 0.40)
+    markers.append(disc)
+
+    # "GOAL" text above cylinder
+    lbl = _base_marker(header, "nav_goal_label", mid, _Marker.TEXT_VIEW_FACING)
+    mid += 1
+    lbl.pose.position.x = gx
+    lbl.pose.position.y = gy
+    lbl.pose.position.z = 1.40
+    lbl.pose.orientation.w = 1.0
+    lbl.text = "GOAL"
+    lbl.scale.z = 0.40
+    lbl.color = _make_color(1.00, 0.50, 0.50, 1.00)
+    markers.append(lbl)
+
+    return markers, mid
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 def build_scene_graph_markers(
@@ -94,24 +543,24 @@ def build_scene_graph_markers(
     robot_y: float = 0.0,
     robot_heading: float = 0.0,
     nav_goal: tuple[float, float] | None = None,
+    trajectory: list[tuple[float, float]] | None = None,
 ) -> Any:
     """Build a MarkerArray from the current scene graph state.
 
     Args:
         scene_graph: SceneGraph instance (or None for static room layout only).
-        stamp: ROS2 Time stamp. If None, uses current time.
-        robot_x, robot_y: Current robot position.
-        robot_heading: Current heading in radians.
+        stamp: ROS2 Time stamp. If None, uses current wall time.
+        robot_x, robot_y: Current robot position in metres.
+        robot_heading: Current heading in radians (yaw, CCW positive).
         nav_goal: Optional (x, y) of current navigation target.
+        trajectory: Optional list of (x, y) tuples for path history (oldest first).
+                    Capped at _TRAJECTORY_MAX_POINTS most-recent entries.
 
     Returns:
         visualization_msgs/MarkerArray, or None if ROS2 not available.
     """
     if not _ensure_imports():
         return None
-
-    markers = _MarkerArray()
-    marker_id = 0
 
     if stamp is None:
         import builtin_interfaces.msg
@@ -120,195 +569,40 @@ def build_scene_graph_markers(
         stamp.sec = int(now)
         stamp.nanosec = int((now % 1) * 1e9)
 
-    header = _Header()
-    header.frame_id = "map"
-    header.stamp = stamp
+    header = _make_header(stamp)
+    markers: list[Any] = []
+    mid = 0
 
-    # --- Room boundaries (static, always shown) ---
-    for room_name, (x0, y0, x1, y1) in _ROOM_BOUNDS.items():
-        color = _ROOM_COLORS.get(room_name, (0.5, 0.5, 0.5, 0.3))
+    # Rooms (fill + borders + labels)
+    room_markers, mid = _build_room_markers(header, scene_graph, mid)
+    markers.extend(room_markers)
 
-        # Filled rectangle — color and opacity reflect exploration status:
-        #   unvisited: grey, alpha=0.15
-        #   visited:   room color, alpha scales with coverage (0.2 → 0.6)
-        is_visited = False
-        coverage = 0.0
-        if scene_graph is not None:
-            room_node = scene_graph.get_room(room_name)
-            if room_node and room_node.visit_count > 0:
-                is_visited = True
-                coverage = scene_graph.get_room_coverage(room_name)
+    # Viewpoints + FOV cones
+    vp_markers, mid = _build_viewpoint_markers(header, scene_graph, mid)
+    markers.extend(vp_markers)
 
-        m = _Marker()
-        m.header = header
-        m.ns = "rooms"
-        m.id = marker_id
-        marker_id += 1
-        m.type = _Marker.CUBE
-        m.action = _Marker.ADD
-        m.pose.position.x = (x0 + x1) / 2
-        m.pose.position.y = (y0 + y1) / 2
-        m.pose.position.z = 0.01
-        m.scale.x = x1 - x0
-        m.scale.y = y1 - y0
-        m.scale.z = 0.02
-        if is_visited:
-            m.color.r = color[0]
-            m.color.g = color[1]
-            m.color.b = color[2]
-            m.color.a = 0.2 + coverage * 0.4  # 0.2 (just visited) → 0.6 (fully covered)
-        else:
-            m.color.r = 0.4
-            m.color.g = 0.4
-            m.color.b = 0.4
-            m.color.a = 0.15
-        m.lifetime.sec = 0  # persistent
-        markers.markers.append(m)
+    # Objects + labels
+    obj_markers, mid = _build_object_markers(header, scene_graph, mid)
+    markers.extend(obj_markers)
 
-        # Room label
-        m_text = _Marker()
-        m_text.header = header
-        m_text.ns = "room_labels"
-        m_text.id = marker_id
-        marker_id += 1
-        m_text.type = _Marker.TEXT_VIEW_FACING
-        m_text.action = _Marker.ADD
-        cx, cy = _ROOM_CENTERS[room_name]
-        m_text.pose.position.x = cx
-        m_text.pose.position.y = cy
-        m_text.pose.position.z = 0.5
+    # Robot arrow + body
+    robot_markers, mid = _build_robot_markers(
+        header, robot_x, robot_y, robot_heading, mid
+    )
+    markers.extend(robot_markers)
 
-        # Label text: room name + visit info from scene graph
-        label = room_name
-        if scene_graph is not None:
-            room_node = scene_graph.get_room(room_name)
-            if room_node and room_node.visit_count > 0:
-                cov = scene_graph.get_room_coverage(room_name)
-                n_objs = len(scene_graph.find_objects_in_room(room_name))
-                label = f"{room_name}\n{room_node.visit_count}x | {cov:.0%} | {n_objs} obj"
+    # Trajectory trail
+    if trajectory:
+        # Trim to most-recent N points
+        traj = list(trajectory[-_TRAJECTORY_MAX_POINTS:])
+        traj_markers, mid = _build_trajectory_marker(header, traj, mid)
+        markers.extend(traj_markers)
 
-        m_text.text = label
-        m_text.scale.z = 0.4  # text height
-        m_text.color.r = 1.0
-        m_text.color.g = 1.0
-        m_text.color.b = 1.0
-        m_text.color.a = 0.9
-        markers.markers.append(m_text)
-
-    # --- Viewpoints (green spheres) ---
-    if scene_graph is not None:
-        for room in scene_graph.get_all_rooms():
-            for vp in scene_graph.get_viewpoints_in_room(room.room_id):
-                m = _Marker()
-                m.header = header
-                m.ns = "viewpoints"
-                m.id = marker_id
-                marker_id += 1
-                m.type = _Marker.SPHERE
-                m.action = _Marker.ADD
-                m.pose.position.x = vp.x
-                m.pose.position.y = vp.y
-                m.pose.position.z = 0.15
-                m.scale.x = 0.3
-                m.scale.y = 0.3
-                m.scale.z = 0.3
-                m.color.r = 0.0
-                m.color.g = 0.8
-                m.color.b = 0.0
-                m.color.a = 0.7
-                markers.markers.append(m)
-
-    # --- Objects (orange cubes with labels) ---
-    if scene_graph is not None:
-        for room in scene_graph.get_all_rooms():
-            objs = scene_graph.find_objects_in_room(room.room_id)
-            cx, cy = room.center_x, room.center_y
-            for i, obj in enumerate(objs):
-                angle = i * 2 * math.pi / max(len(objs), 1)
-                ox = cx + 0.8 * math.cos(angle)
-                oy = cy + 0.8 * math.sin(angle)
-
-                # Object cube
-                m = _Marker()
-                m.header = header
-                m.ns = "objects"
-                m.id = marker_id
-                marker_id += 1
-                m.type = _Marker.CUBE
-                m.action = _Marker.ADD
-                m.pose.position.x = ox
-                m.pose.position.y = oy
-                m.pose.position.z = 0.15
-                m.scale.x = 0.25
-                m.scale.y = 0.25
-                m.scale.z = 0.25
-                m.color.r = 1.0
-                m.color.g = 0.55
-                m.color.b = 0.0
-                m.color.a = 0.8
-                markers.markers.append(m)
-
-                # Object label
-                m_label = _Marker()
-                m_label.header = header
-                m_label.ns = "object_labels"
-                m_label.id = marker_id
-                marker_id += 1
-                m_label.type = _Marker.TEXT_VIEW_FACING
-                m_label.action = _Marker.ADD
-                m_label.pose.position.x = ox
-                m_label.pose.position.y = oy
-                m_label.pose.position.z = 0.45
-                m_label.text = obj.category
-                m_label.scale.z = 0.25
-                m_label.color.r = 1.0
-                m_label.color.g = 0.8
-                m_label.color.b = 0.0
-                m_label.color.a = 0.9
-                markers.markers.append(m_label)
-
-    # --- Robot position (teal arrow) ---
-    m_robot = _Marker()
-    m_robot.header = header
-    m_robot.ns = "robot"
-    m_robot.id = marker_id
-    marker_id += 1
-    m_robot.type = _Marker.ARROW
-    m_robot.action = _Marker.ADD
-    m_robot.pose.position.x = robot_x
-    m_robot.pose.position.y = robot_y
-    m_robot.pose.position.z = 0.2
-    # Quaternion from heading
-    m_robot.pose.orientation.z = math.sin(robot_heading / 2)
-    m_robot.pose.orientation.w = math.cos(robot_heading / 2)
-    m_robot.scale.x = 0.6  # arrow length
-    m_robot.scale.y = 0.15  # arrow width
-    m_robot.scale.z = 0.15  # arrow height
-    m_robot.color.r = 0.0
-    m_robot.color.g = 0.71
-    m_robot.color.b = 0.71
-    m_robot.color.a = 1.0
-    markers.markers.append(m_robot)
-
-    # --- Navigation goal (red sphere) ---
+    # Nav goal beacon
     if nav_goal is not None:
-        m_goal = _Marker()
-        m_goal.header = header
-        m_goal.ns = "nav_goal"
-        m_goal.id = marker_id
-        marker_id += 1
-        m_goal.type = _Marker.SPHERE
-        m_goal.action = _Marker.ADD
-        m_goal.pose.position.x = nav_goal[0]
-        m_goal.pose.position.y = nav_goal[1]
-        m_goal.pose.position.z = 0.3
-        m_goal.scale.x = 0.5
-        m_goal.scale.y = 0.5
-        m_goal.scale.z = 0.5
-        m_goal.color.r = 1.0
-        m_goal.color.g = 0.1
-        m_goal.color.b = 0.1
-        m_goal.color.a = 0.8
-        markers.markers.append(m_goal)
+        goal_markers, mid = _build_nav_goal_markers(header, nav_goal, mid)
+        markers.extend(goal_markers)
 
-    return markers
+    ma = _MarkerArray()
+    ma.markers = markers
+    return ma

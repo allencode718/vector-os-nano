@@ -505,28 +505,58 @@ class SceneGraph:
         heading: float,
         objects: list[str],
         description: str = "",
+        detected_objects: list[tuple[str, float, float]] | None = None,
     ) -> ViewpointNode | None:
         """Full viewpoint-aware observation (new API).
 
         Only adds a viewpoint if position is far enough from existing ones.
         Returns the ViewpointNode if created, None if skipped.
+
+        Args:
+            room: Room identifier.
+            x: Robot x position (world frame).
+            y: Robot y position (world frame).
+            heading: Robot heading in radians.
+            objects: Plain list of object name strings (used when
+                detected_objects is None or empty).
+            description: VLM scene description.
+            detected_objects: Optional list of (category, obj_x, obj_y)
+                tuples carrying per-object world coordinates from a
+                downstream detector (e.g. GroundingDINO + depth projection).
+                When non-empty this overrides the plain ``objects`` list.
         """
+        # Determine which object source to use.
+        use_detected = bool(detected_objects)
+
         if not self.should_add_viewpoint(room, x, y):
-            # Still record objects even if viewpoint not added
+            # Still record objects even if viewpoint not added.
             with self._lock:
-                for obj_name in objects:
-                    # Find nearest viewpoint to associate with
-                    nearest_vp = ""
-                    for vp in self._viewpoints.values():
-                        if vp.room_id == room:
-                            nearest_vp = vp.viewpoint_id
-                            break
-                    if nearest_vp:
-                        self.merge_object(
-                            category=obj_name, room_id=room,
-                            viewpoint_id=nearest_vp,
-                        )
+                nearest_vp = ""
+                for vp in self._viewpoints.values():
+                    if vp.room_id == room:
+                        nearest_vp = vp.viewpoint_id
+                        break
+                if nearest_vp:
+                    if use_detected:
+                        for category, obj_x, obj_y in detected_objects:  # type: ignore[union-attr]
+                            self.merge_object(
+                                category=category, room_id=room,
+                                viewpoint_id=nearest_vp,
+                                x=obj_x, y=obj_y,
+                            )
+                    else:
+                        for obj_name in objects:
+                            self.merge_object(
+                                category=obj_name, room_id=room,
+                                viewpoint_id=nearest_vp,
+                            )
             return None
+
+        # Build object_ids tuple for the ViewpointNode record.
+        if use_detected:
+            vp_object_ids = tuple(cat for cat, _, _ in detected_objects)  # type: ignore[union-attr]
+        else:
+            vp_object_ids = tuple(objects)
 
         vp_id = f"vp_{uuid.uuid4().hex[:8]}"
         vp = ViewpointNode(
@@ -535,21 +565,27 @@ class SceneGraph:
             x=x, y=y,
             heading=heading,
             scene_summary=description,
-            object_ids=tuple(objects),
+            object_ids=vp_object_ids,
         )
         self.add_viewpoint(vp)
 
-        # Visit room if not yet visited
+        # Visit room if not yet visited.
         self.visit(room, x, y)
 
-        # Add objects — no individual coords (VLM gives names, not positions).
-        # The viz layer uses viewpoint (x, y, heading) to position objects.
+        # Merge objects with or without per-object world coordinates.
         with self._lock:
-            for obj_name in objects:
-                self.merge_object(
-                    category=obj_name, room_id=room,
-                    viewpoint_id=vp_id,
-                )
+            if use_detected:
+                for category, obj_x, obj_y in detected_objects:  # type: ignore[union-attr]
+                    self.merge_object(
+                        category=category, room_id=room,
+                        viewpoint_id=vp_id, x=obj_x, y=obj_y,
+                    )
+            else:
+                for obj_name in objects:
+                    self.merge_object(
+                        category=obj_name, room_id=room,
+                        viewpoint_id=vp_id,
+                    )
 
         return vp
 

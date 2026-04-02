@@ -40,10 +40,11 @@ _COST_PER_INPUT_TOKEN: float = 2.50 / 1_000_000   # USD per input token
 _COST_PER_OUTPUT_TOKEN: float = 10.00 / 1_000_000  # USD per output token
 
 _OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
-_MODEL: str = "openai/gpt-4o"
-_TIMEOUT_S: float = 45.0
+_MODEL: str = "openai/gpt-4o-mini"
+_TIMEOUT_S: float = 15.0
 _MAX_RETRIES: int = 2
-_JPEG_QUALITY: int = 85
+_JPEG_QUALITY: int = 50
+_VLM_IMAGE_MAX_DIM: int = 160  # resize before encoding to keep base64 < 10KB
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +237,10 @@ class Go2VLMPerception:
     def _encode_frame(self, frame: np.ndarray) -> str:
         """Encode a numpy RGB frame as a base64 JPEG string.
 
+        Resizes to at most _VLM_IMAGE_MAX_DIM on the longest side to keep
+        the base64 payload small (< 10KB). OpenRouter has issues with large
+        base64 inline images — smaller payloads are reliably fast (~1-2s).
+
         Args:
             frame: (H, W, 3) uint8 RGB array.
 
@@ -243,6 +248,13 @@ class Go2VLMPerception:
             Base64-encoded JPEG bytes (no data URI prefix).
         """
         pil_image = Image.fromarray(frame)
+        # Resize if larger than max dimension
+        w, h = pil_image.size
+        if max(w, h) > _VLM_IMAGE_MAX_DIM:
+            scale = _VLM_IMAGE_MAX_DIM / max(w, h)
+            pil_image = pil_image.resize(
+                (int(w * scale), int(h * scale)), Image.LANCZOS,
+            )
         buf = BytesIO()
         pil_image.save(buf, format="JPEG", quality=_JPEG_QUALITY)
         return base64.b64encode(buf.getvalue()).decode("ascii")

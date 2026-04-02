@@ -89,6 +89,7 @@ SLASH_COMMANDS: list[tuple[str, str, bool]] = [
     ("export", "Export session as markdown", False),
     ("compact", "Compress context window", False),
     ("clear", "Reset conversation", False),
+    ("clear_memory", "Clear scene graph (forget all explored rooms/objects)", False),
     ("sessions", "List saved sessions", False),
     ("quit", "Exit", False),
 ]
@@ -733,6 +734,33 @@ def _handle_slash_command(
             console.print(f"[dim]  Conversation cleared.[/dim]")
         else:
             console.print("[dim]No session.[/dim]")
+
+    elif cmd == "clear_memory":
+        agent_obj = app_state.get("agent") if app_state else None
+        if agent_obj is not None:
+            sm = getattr(agent_obj, "_spatial_memory", None)
+            if sm is not None:
+                # Reset to empty graph, keeping persist_path
+                persist_path = getattr(sm, "_persist_path", None)
+                from vector_os_nano.core.scene_graph import SceneGraph
+                new_sg = SceneGraph(persist_path=persist_path)
+                agent_obj._spatial_memory = new_sg
+                # Also update proxy's reference
+                base = getattr(agent_obj, "_base", None)
+                if base is not None and hasattr(base, "_scene_graph"):
+                    base._scene_graph = new_sg
+                # Delete the file
+                if persist_path:
+                    import os as _os
+                    try:
+                        _os.remove(persist_path)
+                    except FileNotFoundError:
+                        pass
+                console.print(f"[dim]  Scene graph cleared. All rooms/objects forgotten.[/dim]")
+            else:
+                console.print("[dim]No scene graph to clear.[/dim]")
+        else:
+            console.print("[dim]No agent running.[/dim]")
 
     elif cmd == "model":
         if not args_rest:

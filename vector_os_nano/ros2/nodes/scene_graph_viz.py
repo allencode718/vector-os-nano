@@ -364,15 +364,34 @@ def _build_object_markers(
 
     for room in scene_graph.get_all_rooms():
         objs = scene_graph.find_objects_in_room(room.room_id)
-        # Use map-defined room center, NOT the dynamic SceneGraph center
-        # (which is set to robot position at visit time and may be wrong)
-        cx, cy = _ROOM_CENTERS.get(room.room_id, (room.center_x, room.center_y))
-        n = max(len(objs), 1)
+        if not objs:
+            continue
+
+        # Place objects INSIDE the room bounds (not at center point).
+        # VLM can't give world coords, so we distribute objects in a grid
+        # pattern within the room boundary.
+        bounds = _ROOM_BOUNDS.get(room.room_id)
+        if bounds:
+            x0, y0, x1, y1 = bounds
+        else:
+            cx, cy = _ROOM_CENTERS.get(room.room_id, (room.center_x, room.center_y))
+            x0, y0, x1, y1 = cx - 2, cy - 2, cx + 2, cy + 2
+
+        # Shrink bounds by margin so objects don't sit on walls
+        margin = 0.6
+        ix0, iy0 = x0 + margin, y0 + margin
+        ix1, iy1 = x1 - margin, y1 - margin
+        w, h = max(ix1 - ix0, 0.5), max(iy1 - iy0, 0.5)
+
+        n = len(objs)
+        # Grid layout: compute rows/cols to fill the room
+        cols = max(1, int(math.ceil(math.sqrt(n * w / h))))
+        rows = max(1, int(math.ceil(n / cols)))
 
         for i, obj in enumerate(objs):
-            angle = i * 2 * math.pi / n
-            ox = cx + 0.85 * math.cos(angle)
-            oy = cy + 0.85 * math.sin(angle)
+            row, col = divmod(i, cols)
+            ox = ix0 + (col + 0.5) * w / cols
+            oy = iy0 + (row + 0.5) * h / rows
 
             cat_lower = obj.category.lower()
             r, g, b = _OBJECT_COLORS.get(cat_lower, _OBJECT_COLOR_DEFAULT)

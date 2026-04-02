@@ -41,8 +41,8 @@ _COST_PER_OUTPUT_TOKEN: float = 10.00 / 1_000_000  # USD per output token
 
 _OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
 _MODEL: str = "openai/gpt-4o"
-_TIMEOUT_S: float = 30.0
-_MAX_RETRIES: int = 3
+_TIMEOUT_S: float = 45.0
+_MAX_RETRIES: int = 2
 _JPEG_QUALITY: int = 85
 
 

@@ -168,18 +168,22 @@ def detect_objects(
     results = _processor.post_process_grounded_object_detection(
         outputs,
         inputs["input_ids"],
-        box_threshold=confidence_threshold,
+        threshold=confidence_threshold,
         text_threshold=confidence_threshold,
         target_sizes=[pil_image.size[::-1]],  # (H, W)
     )[0]
 
     detections = []
+    # Use text_labels (string names) instead of labels (deprecated, returns ids in v5+)
+    labels_key = "text_labels" if "text_labels" in results else "labels"
     for score, label, box in zip(
-        results["scores"], results["labels"], results["boxes"]
+        results["scores"], results[labels_key], results["boxes"]
     ):
         u1, v1, u2, v2 = box.cpu().tolist()
+        # Clean label: take the first word if multi-word ("table sofa" → "table")
+        clean_label = str(label).strip().split()[0] if label else "object"
         detections.append({
-            "label": label.strip(),
+            "label": clean_label,
             "confidence": float(score.cpu()),
             "bbox": (u1, v1, u2, v2),
         })

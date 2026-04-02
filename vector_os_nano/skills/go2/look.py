@@ -56,13 +56,20 @@ class LookSkill:
     def execute(self, params: dict, context: SkillContext) -> SkillResult:
         """Capture a camera frame, run VLM scene description and room ID.
 
+        VLM provides: room identification (identify_room) and scene summary
+        (describe_scene).  GroundingDINO detector (if available in services)
+        provides per-object world coordinates via depth projection.
+
         Args:
             params: Unused (LookSkill has no parameters).
             context: SkillContext with base and vlm service attached.
+                     Optional: context.services["detector"] callable with
+                     signature (rgb, depth, RobotPose) -> list[Detection].
 
         Returns:
             SkillResult with result_data containing room, summary, objects,
-            details, and room_confidence.
+            details, and room_confidence.  When detector is active, each
+            object entry also has world_x, world_y, depth_m.
         """
         if context.base is None:
             logger.error("[LOOK] No base connected")
@@ -81,7 +88,7 @@ class LookSkill:
                 diagnosis_code="no_vlm",
             )
 
-        # Capture RGB + depth from robot camera (sim: MuJoCo, real: D435).
+        # Capture RGB frame from robot camera (sim: MuJoCo, real: D435).
         try:
             frame: np.ndarray = context.base.get_camera_frame()
         except Exception as exc:
@@ -92,7 +99,7 @@ class LookSkill:
                 diagnosis_code="camera_failed",
             )
 
-        # Run VLM calls — both scene description and room identification.
+        # Run VLM calls — scene description (summary + object names) and room ID.
         try:
             scene = vlm.describe_scene(frame)
             room_id = vlm.identify_room(frame)
@@ -107,43 +114,116 @@ class LookSkill:
         # Prefer VLM room over positional heuristic; fall back if "unknown".
         room: str = room_id.room if room_id.room != "unknown" else _fallback_room(context)
 
-        # Get robot pose for viewpoint recording.
+        # Get robot pose for viewpoint recording and depth projection.
         pos = context.base.get_position()
         heading = context.base.get_heading()
 
+        # ------------------------------------------------------------------
+        # Object detection with world positioning (GroundingDINO + depth).
+        # Detector provides per-object (x, y, z) in world frame.
+        # VLM still owns room_id and scene summary.
+        # ------------------------------------------------------------------
+        detected_objects: list[Any] = []
+        detector = context.services.get("detector")
+        if detector is not None and hasattr(context.base, "get_depth_frame"):
+            try:
+                from vector_os_nano.perception.object_detector import RobotPose
+                depth_frame: np.ndarray = context.base.get_depth_frame()
+                pose = RobotPose(
+                    x=float(pos[0]),
+                    y=float(pos[1]),
+                    z=float(pos[2]),
+                    heading=float(heading),
+                )
+                detected_objects = detector(frame, depth_frame, pose)
+            except Exception as exc:
+                logger.warning("[LOOK] Detector failed: %s", exc)
+                detected_objects = []
+
+        # ------------------------------------------------------------------
+        # Build objects_data: prefer detector results (have world coords),
+        # fall back to VLM-only names when detector unavailable or empty.
+        # ------------------------------------------------------------------
+        if detected_objects:
+            objects_data: list[dict[str, Any]] = [
+                {
+                    "name": det.label,
+                    "description": "",
+                    "confidence": det.confidence,
+                    "world_x": det.world_x,
+                    "world_y": det.world_y,
+                    "world_z": det.world_z,
+                    "depth_m": det.depth_m,
+                }
+                for det in detected_objects
+            ]
+        else:
+            objects_data = [
+                {
+                    "name": obj.name,
+                    "description": obj.description,
+                    "confidence": obj.confidence,
+                }
+                for obj in scene.objects
+            ]
+
+        # ------------------------------------------------------------------
         # Record to spatial memory / scene graph.
-        # Viewpoint = robot position (precise). Objects have no individual
-        # coords — the viz layer places them in front of the viewpoint heading.
+        # When detector found objects: record each with its world coords.
+        # When VLM-only: use standard observe_with_viewpoint.
+        # ------------------------------------------------------------------
         spatial_memory = context.services.get("spatial_memory")
         if spatial_memory is not None:
-            object_names: list[str] = [obj.name for obj in scene.objects]
             try:
-                if hasattr(spatial_memory, "observe_with_viewpoint"):
+                if detected_objects and hasattr(spatial_memory, "merge_object"):
+                    # SceneGraph path: viewpoint first, then per-object world coords.
+                    vp_id: str = ""
+                    if hasattr(spatial_memory, "observe_with_viewpoint"):
+                        vp = spatial_memory.observe_with_viewpoint(
+                            room, float(pos[0]), float(pos[1]),
+                            float(heading),
+                            [det.label for det in detected_objects],
+                            scene.summary,
+                        )
+                        vp_id = vp.viewpoint_id if vp is not None else ""
+                        if not vp_id and hasattr(spatial_memory, "_viewpoints"):
+                            # Nearest viewpoint was reused — find it
+                            for existing_vp in spatial_memory._viewpoints.values():
+                                if existing_vp.room_id == room:
+                                    vp_id = existing_vp.viewpoint_id
+                                    break
+
+                    # Merge each detected object with its world coordinates.
+                    for det in detected_objects:
+                        spatial_memory.merge_object(
+                            category=det.label,
+                            room_id=room,
+                            viewpoint_id=vp_id,
+                            confidence=det.confidence,
+                            x=det.world_x,
+                            y=det.world_y,
+                        )
+                elif hasattr(spatial_memory, "observe_with_viewpoint"):
+                    object_names: list[str] = [obj.name for obj in scene.objects]
                     spatial_memory.observe_with_viewpoint(
                         room, float(pos[0]), float(pos[1]),
                         float(heading), object_names, scene.summary,
                     )
                 else:
+                    object_names = [obj.name for obj in scene.objects]
                     spatial_memory.visit(room, float(pos[0]), float(pos[1]))
                     spatial_memory.observe(room, object_names, scene.summary)
             except Exception as exc:
                 logger.warning("[LOOK] spatial_memory update failed: %s", exc)
 
-        objects_data: list[dict[str, Any]] = [
-            {
-                "name": obj.name,
-                "description": obj.description,
-                "confidence": obj.confidence,
-            }
-            for obj in scene.objects
-        ]
-
         logger.info(
-            "[LOOK] room=%s confidence=%.2f summary=%s objects=%d",
+            "[LOOK] room=%s confidence=%.2f summary=%s objects=%d "
+            "(detector=%s)",
             room,
             room_id.confidence,
             scene.summary,
-            len(scene.objects),
+            len(objects_data),
+            "yes" if detected_objects else "no",
         )
 
         return SkillResult(

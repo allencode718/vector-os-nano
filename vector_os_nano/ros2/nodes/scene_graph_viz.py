@@ -360,23 +360,29 @@ def _compute_object_position(
 ) -> tuple[float, float]:
     """Compute world position for an object marker.
 
-    We know the robot's position and heading when it saw the objects,
-    but VLM only returns names — no pixel coordinates, no per-object
-    depth. So we place objects as a CLUSTER in front of the viewpoint:
+    Priority order:
+    1. If the object has world coordinates from depth projection (obj.x, obj.y
+       are non-zero), use them directly. This is the most accurate path --
+       GroundingDINO bbox center + depth + camera_to_world.
+    2. If a viewpoint is available, place objects in a cluster 2m along the
+       viewpoint heading (heuristic for VLM-only detections).
+    3. Fall back to room center.
 
-    1. Find the viewpoint that saw this object.
-    2. Compute the "scene center" = viewpoint + 2m along heading.
-       This is approximately where the camera was pointing.
-    3. Distribute objects in a small cluster around scene center.
-       Each object gets a unique offset so they don't overlap.
-    4. Clamp inside room bounds.
-
-    Fall back to room center if no viewpoint is available.
+    All positions are clamped inside room bounds.
     """
     bounds = _ROOM_BOUNDS.get(room_id)
     margin = 0.5
 
-    # Try to find the viewpoint that observed this object
+    # --- Best path: detector provided world coordinates via depth projection.
+    if obj.x != 0.0 or obj.y != 0.0:
+        ox, oy = obj.x, obj.y
+        if bounds:
+            x0, y0, x1, y1 = bounds
+            ox = max(x0 + margin, min(x1 - margin, ox))
+            oy = max(y0 + margin, min(y1 - margin, oy))
+        return ox, oy
+
+    # --- Heuristic: cluster objects in front of the observing viewpoint.
     vp = None
     if obj.viewpoint_ids and scene_graph is not None:
         for vp_id in obj.viewpoint_ids:
@@ -392,11 +398,9 @@ def _compute_object_position(
         scene_cy = vp.y + scene_dist * math.sin(vp.heading)
 
         # Distribute objects in a cluster around scene center.
-        # Use a grid-like scatter within a ~1m radius circle.
         if total_objs == 1:
             ox, oy = scene_cx, scene_cy
         else:
-            # Arrange in a circle of radius proportional to object count
             cluster_radius = min(0.8, 0.3 + 0.1 * total_objs)
             angle = obj_index * 2.0 * math.pi / total_objs
             ox = scene_cx + cluster_radius * math.cos(angle)

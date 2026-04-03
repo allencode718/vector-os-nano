@@ -219,7 +219,7 @@ def detect_and_project(
         Returns empty list if model unavailable.
     """
     from vector_os_nano.perception.depth_projection import (
-        d435_intrinsics,
+        get_intrinsics,
         depth_to_world,
     )
 
@@ -228,7 +228,7 @@ def detect_and_project(
         return []
 
     h, w = depth.shape[:2]
-    intrinsics = d435_intrinsics(w, h)
+    intrinsics = get_intrinsics(w, h, sim=True)  # TODO: detect sim vs real
     results: list[Detection] = []
 
     for det in raw:

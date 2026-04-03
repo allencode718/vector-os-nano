@@ -757,91 +757,42 @@ class MuJoCoGo2:
     def get_camera_frame(
         self, width: int = 320, height: int = 240,
     ) -> "np.ndarray":
-        """Render first-person RGB frame from Go2 head camera.
+        """Render first-person RGB from d435_rgb camera mounted on Go2 head.
 
         Returns an (H, W, 3) uint8 numpy array in RGB order.
-        Lazily creates a MuJoCo Renderer on first call.
-
-        The camera is positioned at the sensor mount (0.2m forward, 0.1m up)
-        looking 1m ahead with a slight downward tilt — matching the bridge's
-        _publish_camera() rendering.
+        Uses the named 'd435_rgb' camera defined in the MJCF model, which is
+        fixed to base_link. This gives the exact same view as a real D435
+        mounted on the robot — no free-camera approximation.
         """
         self._require_connection()
         mj = _get_mujoco()
 
         if not hasattr(self, "_cam_renderer"):
             self._cam_renderer = mj.Renderer(self._mj.model, height, width)
-            self._cam_obj = mj.MjvCamera()
-            self._cam_obj.type = mj.mjtCamera.mjCAMERA_FREE
 
-        heading = self.get_heading()
-        cos_h = math.cos(heading)
-        sin_h = math.sin(heading)
-        odom = self.get_odometry()
-
-        cam_x = odom.x + cos_h * 0.3  # sensor_x(0.2) + forward(0.1)
-        cam_y = odom.y + sin_h * 0.3
-        cam_z = odom.z + 0.15          # raised to see furniture, not just floor
-
-        self._cam_obj.lookat[:] = [
-            cam_x + cos_h * 2.0,        # look further ahead (2m vs 1m)
-            cam_y + sin_h * 2.0,
-            cam_z + 0.1,                # look slightly UP to see room features
-        ]
-        self._cam_obj.distance = 2.0    # wider field of view
-        self._cam_obj.azimuth = math.degrees(heading) + 180
-        self._cam_obj.elevation = -5    # less downward tilt
-
-        self._cam_renderer.update_scene(self._mj.data, camera=self._cam_obj)
+        cam_id = self._mj.model.cam("d435_rgb").id
+        self._cam_renderer.update_scene(self._mj.data, camera=cam_id)
         return self._cam_renderer.render().copy()
 
     def get_depth_frame(
         self, width: int = 320, height: int = 240,
     ) -> "np.ndarray":
-        """Render depth frame from Go2 head camera (simulated RealSense D435).
+        """Render depth from d435_depth camera mounted on Go2 head.
 
-        Returns an (H, W) float32 numpy array in metres. Values are metric
-        depth from the camera plane. Pixels beyond the sensor range (~10m)
-        or with no geometry return 0.0.
-
-        Uses the same camera pose as get_camera_frame() so RGB and depth
-        are pixel-aligned (like a real RealSense D435 aligned_depth_to_color).
+        Returns an (H, W) float32 numpy array in metres. Uses the named
+        'd435_depth' camera — same mounting as RGB for pixel alignment.
         """
         self._require_connection()
         mj = _get_mujoco()
 
         if not hasattr(self, "_depth_renderer"):
             self._depth_renderer = mj.Renderer(self._mj.model, height, width)
-            self._depth_renderer.enable_depth_rendering(True)
+            self._depth_renderer.enable_depth_rendering()
 
-        # Use the same camera setup as get_camera_frame
-        heading = self.get_heading()
-        cos_h = math.cos(heading)
-        sin_h = math.sin(heading)
-        odom = self.get_odometry()
-
-        if not hasattr(self, "_cam_obj"):
-            self._cam_obj = mj.MjvCamera()
-            self._cam_obj.type = mj.mjtCamera.mjCAMERA_FREE
-
-        cam_x = odom.x + cos_h * 0.3
-        cam_y = odom.y + sin_h * 0.3
-        cam_z = odom.z + 0.15
-
-        self._cam_obj.lookat[:] = [
-            cam_x + cos_h * 2.0,
-            cam_y + sin_h * 2.0,
-            cam_z + 0.1,
-        ]
-        self._cam_obj.distance = 2.0
-        self._cam_obj.azimuth = math.degrees(heading) + 180
-        self._cam_obj.elevation = -5
-
-        self._depth_renderer.update_scene(self._mj.data, camera=self._cam_obj)
+        cam_id = self._mj.model.cam("d435_depth").id
+        self._depth_renderer.update_scene(self._mj.data, camera=cam_id)
         raw = self._depth_renderer.render().copy()
 
-        # MuJoCo depth renderer returns linear depth in model units (metres)
-        # Clip to D435 range [0.1, 10.0] and set out-of-range to 0
         import numpy as np
         depth = raw.astype(np.float32)
         depth[(depth < 0.1) | (depth > 10.0)] = 0.0

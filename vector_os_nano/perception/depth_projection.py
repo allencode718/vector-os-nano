@@ -44,22 +44,49 @@ class CameraIntrinsics:
 
 
 def d435_intrinsics(width: int = 320, height: int = 240) -> CameraIntrinsics:
-    """Return D435 intrinsics for the given resolution.
+    """Return RealSense D435 intrinsics for the given resolution.
 
-    Based on D435 RGB FOV of ~69° horizontal. Focal length is computed
-    from FOV: fx = (width/2) / tan(hfov/2).
+    Based on D435 RGB FOV of ~69° horizontal.
+    Use this for REAL robot only. For MuJoCo sim, use mujoco_intrinsics().
     """
     hfov_rad = math.radians(69.0)
     fx = (width / 2.0) / math.tan(hfov_rad / 2.0)
-    fy = fx  # square pixels
+    fy = fx
     return CameraIntrinsics(
-        width=width,
-        height=height,
-        fx=fx,
-        fy=fy,
-        cx=width / 2.0,
-        cy=height / 2.0,
+        width=width, height=height, fx=fx, fy=fy,
+        cx=width / 2.0, cy=height / 2.0,
     )
+
+
+def mujoco_intrinsics(width: int = 320, height: int = 240, vfov_deg: float = 42.0) -> CameraIntrinsics:
+    """Return intrinsics for the MuJoCo d435_rgb/d435_depth named camera.
+
+    The d435 cameras are defined in go2.xml with fovy=42° (matching real
+    D435 vertical FOV). Horizontal FOV derives from aspect ratio.
+
+    Args:
+        width: Image width in pixels.
+        height: Image height in pixels.
+        vfov_deg: Vertical FOV in degrees (from MJCF camera fovy attribute).
+    """
+    vfov_rad = math.radians(vfov_deg)
+    fy = (height / 2.0) / math.tan(vfov_rad / 2.0)
+    fx = fy  # square pixels
+    return CameraIntrinsics(
+        width=width, height=height, fx=fx, fy=fy,
+        cx=width / 2.0, cy=height / 2.0,
+    )
+
+
+def get_intrinsics(width: int = 320, height: int = 240, sim: bool = True) -> CameraIntrinsics:
+    """Return camera intrinsics for sim or real.
+
+    In simulation, uses the MJCF d435 camera's fovy=42° (same as real D435).
+    In practice, sim and real should give very similar intrinsics.
+    """
+    if sim:
+        return mujoco_intrinsics(width, height)
+    return d435_intrinsics(width, height)
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +135,9 @@ def camera_to_world(
     cos_h = math.cos(robot_heading)
     sin_h = math.sin(robot_heading)
 
-    # Camera mount offset from body center
-    mount_forward = 0.3   # sensor_x(0.2) + forward(0.1)
-    mount_up = 0.15
+    # Camera mount offset from body center (matches MJCF d435 pos="0.30 0.0 0.05")
+    mount_forward = 0.3
+    mount_up = 0.05
 
     # Camera frame → robot body frame
     # cam_z = forward, cam_x = right, cam_y = down

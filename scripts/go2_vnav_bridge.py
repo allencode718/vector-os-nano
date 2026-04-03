@@ -382,7 +382,7 @@ class Go2VNavBridge(Node):
                     self._depth_renderer = mujoco.Renderer(
                         self._go2._mj.model, 240, 320
                     )
-                    self._depth_renderer.enable_depth_rendering(True)
+                    self._depth_renderer.enable_depth_rendering()
                 except Exception:
                     self._depth_renderer = None
 

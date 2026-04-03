@@ -144,8 +144,8 @@ class TestCameraToWorld:
             robot_x=0, robot_y=0, robot_z=0.28,
             robot_heading=0,
         )
-        # cam_y=0 → body_up=0 → wz = 0.28 + 0.15 = 0.43
-        assert abs(wz - 0.43) < 0.01
+        # cam_y=0 → body_up=0 → wz = 0.28 + 0.05 = 0.33 (mount_up=0.05 per MJCF)
+        assert abs(wz - 0.33) < 0.01
 
 
 # ---------------------------------------------------------------------------

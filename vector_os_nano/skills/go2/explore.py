@@ -313,16 +313,13 @@ def _exploration_loop(base: Any, has_bridge: bool = True) -> None:
         base.set_velocity(0.2, 0.0, 0.15)
         time.sleep(3.0)
 
-    # Wander strategy: send velocity ONLY when the nav stack has no path.
-    # Once TARE/FAR gives waypoints → localPlanner → path → bridge follows it
-    # at full speed (0.5 m/s). We must NOT override this with slow wander.
+    # NO WANDER. TARE + FAR + localPlanner handle all movement autonomously.
+    # The initial seed above gives TARE enough scan data to start planning.
+    # Any /cmd_vel_nav we send would CLEAR the bridge's _current_path and
+    # override the nav stack's path follower — causing the dog to circle.
     #
-    # Detection: check if robot position changes between cycles. If it moved
-    # >0.05m in 2s, the nav stack is driving. If stuck, wander to feed TARE.
-    _last_wander = 0.0
-    _wander_heading = 0.12  # moderate turn
-    _last_pos = (0.0, 0.0)
-    _stuck_count = 0
+    # Reference: launch_explore.sh does the same: seed once, then hands off
+    # to TARE entirely. The nav stack drives at up to 0.8 m/s on its own.
 
     try:
         while not _explore_cancel.is_set():
@@ -331,27 +328,6 @@ def _exploration_loop(base: Any, has_bridge: bool = True) -> None:
                 if pos[2] < 0.12:
                     _emit("stopped", {"reason": "robot_fell", "rooms": sorted(_explore_visited)})
                     break
-
-                # Check if robot is stuck (nav stack not moving it)
-                dx = abs(pos[0] - _last_pos[0])
-                dy = abs(pos[1] - _last_pos[1])
-                moved = (dx + dy) > 0.05
-                _last_pos = (pos[0], pos[1])
-
-                if moved:
-                    _stuck_count = 0
-                else:
-                    _stuck_count += 1
-
-                # Only wander when stuck (nav stack has no path).
-                # After 3 stuck cycles (~6s), start wandering to feed TARE.
-                if has_bridge and _stuck_count > 3:
-                    now = time.time()
-                    if now - _last_wander > 0.8:
-                        base.set_velocity(0.25, 0.0, _wander_heading)
-                        _last_wander = now
-                        if _stuck_count % 5 == 0:
-                            _wander_heading = -_wander_heading  # reverse turn
 
                 room = _detect_current_room(float(pos[0]), float(pos[1]))
                 if room not in _explore_visited:

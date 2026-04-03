@@ -300,18 +300,22 @@ def _exploration_loop(base: Any, has_bridge: bool = True) -> None:
         if not tare_ok:
             logger.warning("[EXPLORE] TARE failed, exploration may be limited")
 
-        # Seed planners: walk forward slowly to generate scan data for TARE/FAR.
-        # Keep a small velocity even after seed — TARE needs continuous scans.
+        # Seed: match launch_explore.sh — short pushes, then STOP.
+        # Each set_velocity → /cmd_vel_nav → bridge treats as teleop for 0.5s.
+        # We must stop quickly so TARE's paths aren't cleared by teleop mode.
         logger.info("[EXPLORE] Seeding planners...")
-        for _ in range(5):
+        for _ in range(4):
             if _explore_cancel.is_set():
                 _explore_running = False
                 return
             base.set_velocity(0.3, 0.0, 0.0)
             time.sleep(1.0)
-        # Brief turn to widen initial scan coverage
-        base.set_velocity(0.2, 0.0, 0.15)
-        time.sleep(3.0)
+        # STOP — critical: let nav stack take over
+        base.set_velocity(0.0, 0.0, 0.0)
+        time.sleep(0.6)  # wait for teleop_until to expire
+        # Wait for TARE to process initial scans and produce first waypoint
+        logger.info("[EXPLORE] Waiting for TARE to plan...")
+        time.sleep(5.0)
 
     # NO WANDER. TARE + FAR + localPlanner handle all movement autonomously.
     # The initial seed above gives TARE enough scan data to start planning.

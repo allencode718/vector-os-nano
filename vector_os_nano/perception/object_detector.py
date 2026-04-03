@@ -256,23 +256,56 @@ def detect_and_project(
         cu = (u1 + u2) / 2.0
         cv = (v1 + v2) / 2.0
 
-        # Sample depth in a small region around bbox center (robust to noise)
-        r = 5  # pixel radius
-        cu_i, cv_i = int(cu), int(cv)
-        patch = depth[
-            max(0, cv_i - r): min(h, cv_i + r),
-            max(0, cu_i - r): min(w, cu_i + r),
-        ]
-        valid = patch[(patch > 0.1) & (patch < 10.0)]
-        d_m = float(np.median(valid)) if len(valid) > 0 else 0.0
+        # --- Robust depth sampling ---
+        # Sample depth inside the bbox (not just the center pixel).
+        # Use the inner 60% of the bbox to avoid edge depth artifacts.
+        bbox_w = u2 - u1
+        bbox_h = v2 - v1
+        margin_u = bbox_w * 0.2
+        margin_v = bbox_h * 0.2
+        inner_u1 = int(max(0, u1 + margin_u))
+        inner_v1 = int(max(0, v1 + margin_v))
+        inner_u2 = int(min(w, u2 - margin_u))
+        inner_v2 = int(min(h, v2 - margin_v))
 
-        # Only record objects within reliable depth range (< 4m).
-        # Beyond 4m: depth noise is high, bbox is small → inaccurate position.
-        if d_m <= 0.0 or d_m > 4.0:
+        if inner_u2 <= inner_u1 or inner_v2 <= inner_v1:
+            # Bbox too small for inner sampling, use center pixel
+            cu_i, cv_i = int(cu), int(cv)
+            if 0 <= cu_i < w and 0 <= cv_i < h:
+                d_m = float(depth[cv_i, cu_i])
+            else:
+                continue
+        else:
+            patch = depth[inner_v1:inner_v2, inner_u1:inner_u2]
+            # D435 reliable range: 0.3m – 3.0m
+            valid = patch[(patch > 0.3) & (patch <= 3.0)]
+            if len(valid) < 5:
+                # Not enough valid depth pixels → unreliable, skip
+                continue
+            d_m = float(np.median(valid))
+
+        # D435 reliable depth range: 0.3 – 3.0m
+        if d_m < 0.3 or d_m > 3.0:
             continue
 
-        # Project to world using camera pose (exact) or robot heading (fallback)
-        wx, wy, wz = 0.0, 0.0, 0.0
+        # --- Bbox quality checks ---
+        # Skip tiny bboxes (< 3% of image area) — too small for accurate depth
+        bbox_area = bbox_w * bbox_h
+        if bbox_area < 0.03 * (w * h):
+            continue
+
+        # Depth variance check: if the depth within the bbox varies wildly,
+        # the object straddles a depth boundary → position unreliable
+        if inner_u2 > inner_u1 and inner_v2 > inner_v1:
+            inner_patch = depth[inner_v1:inner_v2, inner_u1:inner_u2]
+            inner_valid = inner_patch[(inner_patch > 0.3) & (inner_patch <= 3.0)]
+            if len(inner_valid) > 5:
+                depth_std = float(np.std(inner_valid))
+                if depth_std > 0.5:
+                    # High variance → object at a depth discontinuity, skip
+                    continue
+
+        # --- Project to world ---
         from vector_os_nano.perception.depth_projection import pixel_to_camera, camera_to_world
         x_cam, y_cam, z_cam = pixel_to_camera(cu, cv, d_m, intrinsics)
         world_pt = camera_to_world(
@@ -280,18 +313,31 @@ def detect_and_project(
             pose.x, pose.y, pose.z, pose.heading,
             cam_xpos=pose.cam_xpos, cam_xmat=pose.cam_xmat,
         )
-        if world_pt is not None:
-            wx, wy, wz = world_pt
+        if world_pt is None:
+            continue
+        wx, wy, wz = world_pt
 
-        if wx == 0.0 and wy == 0.0:
+        # Sanity: world z should be near ground level (< 2m above floor)
+        if wz > 2.5 or wz < -0.5:
             continue
 
-        # Deduplicate: skip if same category already detected within 1.5m
+        # --- Deduplicate within this frame ---
+        # Same category within 1.0m → keep the one with higher confidence
         duplicate = False
-        for existing in results:
+        for i_existing, existing in enumerate(results):
             if existing.label == det["label"]:
                 dist = math.sqrt((wx - existing.world_x)**2 + (wy - existing.world_y)**2)
-                if dist < 1.5:
+                if dist < 1.0:
+                    # Keep the higher confidence one
+                    if det["confidence"] > existing.confidence:
+                        results[i_existing] = Detection(
+                            label=det["label"],
+                            confidence=det["confidence"],
+                            bbox_u1=u1, bbox_v1=v1,
+                            bbox_u2=u2, bbox_v2=v2,
+                            world_x=wx, world_y=wy, world_z=wz,
+                            depth_m=d_m,
+                        )
                     duplicate = True
                     break
         if duplicate:

@@ -30,9 +30,9 @@ tare_planner_node:
     kAtHomeDistThreshold : 0.5
     kTerrainCollisionThreshold : 0.3
     kLookAheadDistance : 6.0
-    kUseMomentum : false 
-    kDirectionChangeCounterThr : 6
-    kDirectionNoChangeCounterThr : 5
+    kUseMomentum : true
+    kDirectionChangeCounterThr : 10
+    kDirectionNoChangeCounterThr : 8
     kResetWaypointJoystickAxesID : 2
 
     # PlanningEnv

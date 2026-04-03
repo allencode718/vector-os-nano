@@ -478,7 +478,7 @@ class Go2VNavBridge(Node):
         # Lookahead: use a point 1.5m ahead on path
         target = None
         for px, py in self._current_path:
-            if math.sqrt((px - rx)**2 + (py - ry)**2) >= 1.5:
+            if math.sqrt((px - rx)**2 + (py - ry)**2) >= 2.0:  # lookahead 2m (was 1.5)
                 target = (px, py)
                 break
         if target is None:
@@ -499,15 +499,18 @@ class Go2VNavBridge(Node):
         # Forward: ALWAYS positive. cos(err) gives natural speed curve.
         # At 0 error: full speed. At 90 deg: minimum speed. At 180: minimum.
         alignment = max(0.2, math.cos(min(abs(err), 1.4)))
-        vx_target = float(np.clip(0.8 * alignment, 0.15, 0.8))
+        # Reduce alignment penalty so robot doesn't crawl when turning.
+        # Original: 0.8 * alignment → 0.16 m/s at 90° error.
+        # Now: minimum 0.4 m/s even when heading is off.
+        vx_target = float(np.clip(0.8 * max(0.5, alignment), 0.4, 0.8))
 
         # If very close to target, slow down but don't stop
         if dist < 0.5:
             vx_target = min(vx_target, 0.1)
 
-        # Rate limiter
-        max_dvx = 0.04
-        max_dvyaw = 0.06
+        # Rate limiter (20Hz → 0.08 m/s per tick = 1.6 m/s² accel)
+        max_dvx = 0.08
+        max_dvyaw = 0.10
 
         vx = self._prev_vx + float(np.clip(vx_target - self._prev_vx, -max_dvx, max_dvx))
         vyaw = self._prev_vyaw + float(np.clip(vyaw_target - self._prev_vyaw, -max_dvyaw, max_dvyaw))

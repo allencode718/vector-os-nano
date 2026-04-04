@@ -154,6 +154,37 @@ def _detect_current_room(x: float, y: float) -> str:
     return best_room
 
 
+def _get_room_center_from_memory(
+    memory: Any, room_key: str,
+) -> tuple[float, float] | None:
+    """Look up explored room center from spatial memory (SceneGraph).
+
+    Checks both the get_room() SceneGraph API (RoomNode.center_x/center_y)
+    and the backward-compatible get_location() API (LocationRecord.x/y).
+    Returns (x, y) only when center coordinates are non-zero (i.e. a real
+    visited position was stored, not the default 0.0 placeholder).
+
+    Returns None if the room is not in memory or has no valid coordinates.
+    """
+    # SceneGraph direct API
+    if hasattr(memory, "get_room"):
+        room_node = memory.get_room(room_key)
+        if room_node is not None:
+            x, y = room_node.center_x, room_node.center_y
+            if x != 0.0 or y != 0.0:
+                return (x, y)
+
+    # Backward-compatible get_location() API (SceneGraph + SpatialMemory)
+    if hasattr(memory, "get_location"):
+        loc = memory.get_location(room_key)
+        if loc is not None:
+            x, y = getattr(loc, "x", 0.0), getattr(loc, "y", 0.0)
+            if x != 0.0 or y != 0.0:
+                return (x, y)
+
+    return None
+
+
 def _navigate_to_waypoint(
     base: Any,
     target_x: float,
@@ -283,6 +314,21 @@ class NavigateSkill:
 
         target = _ROOM_CENTERS[room_key]
 
+        # Prefer explored room position from SceneGraph over hardcoded map center.
+        # SceneGraph.visit() stores the actual robot position when each room was
+        # visited during exploration — more accurate than the static room map.
+        memory_for_target = context.services.get("spatial_memory")
+        if memory_for_target is not None:
+            explored_pos = _get_room_center_from_memory(memory_for_target, room_key)
+            if explored_pos is not None:
+                logger.info(
+                    "[NAV] Using SceneGraph position for %s: (%.1f, %.1f) "
+                    "[static: (%.1f, %.1f)]",
+                    room_key, explored_pos[0], explored_pos[1],
+                    target[0], target[1],
+                )
+                target = explored_pos
+
         # Cancel background exploration if running (navigate takes priority)
         try:
             from vector_os_nano.skills.go2.explore import cancel_exploration, is_exploring
@@ -291,6 +337,20 @@ class NavigateSkill:
                 logger.info("[NAV] Cancelled background exploration for navigation")
         except Exception:
             pass
+
+        # Ensure nav flag exists so bridge path follower is armed
+        try:
+            import os
+            if not os.path.exists("/tmp/vector_nav_active"):
+                with open("/tmp/vector_nav_active", "w") as fh:
+                    fh.write("1")
+        except Exception:
+            pass
+
+        # --- Mode 0: Direct nav stack via proxy ---
+        if hasattr(context.base, "navigate_to"):
+            result = self._navigate_with_proxy(room_key, target, context)
+            return result
 
         # --- Mode 1: NavStackClient ---
         nav = context.services.get("nav")
@@ -305,6 +365,50 @@ class NavigateSkill:
     # ------------------------------------------------------------------
     # Navigation modes (private)
     # ------------------------------------------------------------------
+
+    def _navigate_with_proxy(
+        self,
+        room_key: str,
+        target: tuple[float, float],
+        context: SkillContext,
+    ) -> SkillResult:
+        """Mode 0: Navigate via Go2ROS2Proxy.navigate_to() — FAR planner path.
+
+        Called when context.base exposes navigate_to() (i.e. the proxy is
+        connected to the live nav stack).  Falls back to dead-reckoning if
+        the proxy call returns False.
+        """
+        logger.info(
+            "[NAV] Proxy mode -> room=%s target=(%.1f, %.1f)",
+            room_key, target[0], target[1],
+        )
+
+        nav_result = context.base.navigate_to(target[0], target[1], timeout=45.0)
+
+        pos = context.base.get_position()
+        dist = _distance(pos[0], pos[1], target[0], target[1])
+
+        # Update spatial memory if available
+        memory = context.services.get("spatial_memory")
+        if memory is not None:
+            memory.visit(room_key, pos[0], pos[1])
+
+        if not nav_result:
+            logger.warning(
+                "[NAV] Proxy navigate_to timed out; falling back to dead-reckoning"
+            )
+            return self._dead_reckoning(room_key, context)
+
+        return SkillResult(
+            success=True,
+            result_data={
+                "room": room_key,
+                "target": [round(target[0], 1), round(target[1], 1)],
+                "position": [round(pos[0], 1), round(pos[1], 1)],
+                "distance_to_target": round(dist, 1),
+                "mode": "proxy_nav_stack",
+            },
+        )
 
     def _navigate_with_nav_stack(
         self,

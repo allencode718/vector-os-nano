@@ -41,7 +41,7 @@ _COST_PER_OUTPUT_TOKEN: float = 10.00 / 1_000_000  # USD per output token
 
 _OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
 _MODEL: str = "google/gemma-4-31b-it"
-_TIMEOUT_S: float = 15.0
+_TIMEOUT_S: float = 30.0
 _MAX_RETRIES: int = 2
 _JPEG_QUALITY: int = 50
 _VLM_IMAGE_MAX_DIM: int = 160  # resize before encoding to keep base64 < 10KB
@@ -346,7 +346,13 @@ class Go2VLMPerception:
 
                 choices: list[dict[str, Any]] = data.get("choices") or []
                 if not choices:
-                    raise RuntimeError("OpenRouter returned no choices.")
+                    logger.warning(
+                        "OpenRouter returned no choices (attempt %d/%d) — retrying",
+                        attempt,
+                        _MAX_RETRIES,
+                    )
+                    last_exc = RuntimeError("OpenRouter returned no choices.")
+                    continue
 
                 return str(
                     choices[0].get("message", {}).get("content", "")

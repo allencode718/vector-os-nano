@@ -163,26 +163,73 @@ def is_exploring() -> bool:
     return _explore_running
 
 
+def stop_tare_only() -> None:
+    """Stop TARE planner while keeping FAR + localPlanner alive.
+
+    Uses pkill to kill just the TARE planner node by process name, without
+    touching the nav stack process group that contains FAR + localPlanner.
+    Also removes the nav flag file so the bridge path follower stops following
+    TARE-generated paths.
+    """
+    global _tare_proc
+
+    # Kill TARE by process name — works whether TARE was launched by us or
+    # by launch_explore.sh as part of a larger process group.
+    try:
+        subprocess.run(
+            ["pkill", "-f", "tare_planner_node"],
+            capture_output=True, timeout=5,
+        )
+        logger.info("[EXPLORE] TARE planner stopped via pkill")
+    except Exception as exc:
+        logger.warning("[EXPLORE] pkill tare_planner_node failed: %s", exc)
+
+    # Also kill via process group if we own _tare_proc
+    if _tare_proc is not None and _tare_proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(_tare_proc.pid), signal.SIGTERM)
+            _tare_proc.wait(timeout=3)
+        except Exception:
+            try:
+                os.killpg(os.getpgid(_tare_proc.pid), signal.SIGKILL)
+            except Exception:
+                pass
+        _tare_proc = None
+
+    # Remove nav flag — bridge path follower stops acting on TARE paths
+    try:
+        os.remove("/tmp/vector_nav_active")
+    except FileNotFoundError:
+        pass
+
+    logger.info("[EXPLORE] TARE stopped; FAR + localPlanner remain running")
+
+
+def is_nav_stack_running() -> bool:
+    """Check if localPlanner is still alive (FAR + localPlanner nav stack).
+
+    Returns True if the localPlanner process is found via pgrep, False otherwise.
+    Does not require the nav stack to have been launched by this module.
+    """
+    if not shutil.which("pgrep"):
+        return False
+    result = subprocess.run(
+        ["pgrep", "-f", "localPlanner"],
+        capture_output=True, timeout=5,
+    )
+    return result.returncode == 0
+
+
 def cancel_exploration() -> None:
-    """Request cancellation of the background exploration thread and nav stack."""
-    global _explore_running, _nav_explore_proc
+    """Request cancellation of the background exploration thread.
+
+    Stops TARE only — FAR + localPlanner remain running for point-to-point nav.
+    Does NOT kill the nav stack process group.
+    """
+    global _explore_running
     if _explore_running:
         _explore_cancel.set()
-        # Stop the entire nav stack process group
-        if _nav_explore_proc is not None and _nav_explore_proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(_nav_explore_proc.pid), signal.SIGTERM)
-                _nav_explore_proc.wait(timeout=5)
-            except Exception:
-                try:
-                    os.killpg(os.getpgid(_nav_explore_proc.pid), signal.SIGKILL)
-                except Exception:
-                    pass
-            _nav_explore_proc = None
-        try:
-            os.remove("/tmp/vector_nav_active")
-        except FileNotFoundError:
-            pass
+        stop_tare_only()
         _emit("stopped", {"reason": "cancelled", "rooms": sorted(_explore_visited)})
 
 
@@ -494,8 +541,12 @@ def _exploration_loop(base: Any, has_bridge: bool = True) -> None:
             _explore_cancel.wait(timeout=_POSITION_SAMPLE_INTERVAL)
 
         if len(_explore_visited) >= len(_ROOM_CENTERS):
+            # All rooms visited — stop TARE but keep FAR + localPlanner alive
+            # for subsequent point-to-point navigation.
+            stop_tare_only()
             _emit("completed", {"rooms": sorted(_explore_visited)})
         elif not _explore_cancel.is_set():
+            stop_tare_only()
             _emit("stopped", {"reason": "finished", "rooms": sorted(_explore_visited)})
 
     finally:

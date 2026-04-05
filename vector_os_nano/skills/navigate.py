@@ -155,6 +155,7 @@ def _detect_current_room(x: float, y: float) -> str:
 
 
 _MIN_VISIT_COUNT: int = 3  # trust SceneGraph position only after N visits
+_MAX_DRIFT: float = 2.0   # max allowed drift from hardcoded center (meters)
 
 
 def _get_room_center_from_memory(
@@ -162,27 +163,45 @@ def _get_room_center_from_memory(
 ) -> tuple[float, float] | None:
     """Look up explored room center from spatial memory (SceneGraph).
 
-    Only trusts positions with visit_count >= _MIN_VISIT_COUNT.
-    A single visit (often at doorway) is unreliable. Multiple visits
-    with running average converge to the actual room center.
+    Only trusts positions that:
+    1. Have visit_count >= _MIN_VISIT_COUNT (not just a doorway drive-by)
+    2. Are within _MAX_DRIFT meters of the hardcoded room center
+       (rejects positions recorded in the wrong room, e.g., hallway
+       position tagged as "kitchen" because robot was near the door)
 
     Returns None if room not in memory or position not trustworthy.
     """
+    pos = None
+
     # SceneGraph direct API
     if hasattr(memory, "get_room"):
         room_node = memory.get_room(room_key)
         if room_node is not None:
             x, y = room_node.center_x, room_node.center_y
             if (x != 0.0 or y != 0.0) and room_node.visit_count >= _MIN_VISIT_COUNT:
-                return (x, y)
+                pos = (x, y)
 
-    # Backward-compatible get_location() API (SceneGraph + SpatialMemory)
-    if hasattr(memory, "get_location"):
+    # Backward-compatible get_location() API
+    if pos is None and hasattr(memory, "get_location"):
         loc = memory.get_location(room_key)
         if loc is not None:
             x, y = getattr(loc, "x", 0.0), getattr(loc, "y", 0.0)
             if x != 0.0 or y != 0.0:
-                return (x, y)
+                pos = (x, y)
+
+    # Sanity check: reject if too far from hardcoded center
+    if pos is not None and room_key in _ROOM_CENTERS:
+        hx, hy = _ROOM_CENTERS[room_key]
+        drift = _distance(pos[0], pos[1], hx, hy)
+        if drift > _MAX_DRIFT:
+            logger.warning(
+                "[NAV] SceneGraph position for %s (%.1f, %.1f) is %.1fm from "
+                "expected center (%.1f, %.1f) — using hardcoded position",
+                room_key, pos[0], pos[1], drift, hx, hy,
+            )
+            return None
+
+    return pos
 
     return None
 

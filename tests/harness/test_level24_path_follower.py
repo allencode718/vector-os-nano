@@ -26,10 +26,10 @@ class TestOmnidirectionalFollower:
         src = _read_bridge()
         assert "pure forward tracking" in src.lower() or "< 0.52" in src
 
-    def test_reverse_only_close_behind(self):
-        """Reverse (vx < 0) should only happen when target is very close behind."""
+    def test_heading_gated_acceleration(self):
+        """Forward speed only when heading is aligned (C++ pure pursuit port)."""
         src = _read_bridge()
-        assert "end_dis < 0.8" in src or "end_dis < 1.0" in src
+        assert "heading_ok" in src or "DIR_DIFF_THRE" in src
 
     def test_strafe_for_moderate_error(self):
         """Uses lateral strafe when direction error is 30-90 degrees."""
@@ -44,16 +44,16 @@ class TestReactiveWallAvoidance:
         src = _read_bridge()
         assert "_scan_surroundings" in src
 
-    def test_lateral_push_from_walls(self):
-        """When close to left/right wall, vy pushes away."""
+    def test_lateral_safety_boundary(self):
+        """When close to left/right wall, vy pushes away (MJCF-based safety)."""
         src = _read_bridge()
-        assert "left_d < 0.4" in src or "left_d < 0.45" in src
-        assert "right_d < 0.4" in src or "right_d < 0.45" in src
+        assert "left_gap" in src or "left_d" in src
+        assert "right_gap" in src or "right_d" in src
 
-    def test_front_slowdown(self):
-        """When obstacle ahead, vx is reduced."""
+    def test_front_safety_boundary(self):
+        """When obstacle ahead within safety envelope, vx is reduced/stopped."""
         src = _read_bridge()
-        assert "front_d < 0.3" in src or "front_d < 0.5" in src or "front_d < 0.6" in src
+        assert "front_d" in src and ("safe_front" in src or "SAFE_FRONT" in src or "BODY_FRONT" in src)
 
 
 class TestStuckRecovery:

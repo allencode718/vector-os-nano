@@ -762,6 +762,14 @@ def _handle_slash_command(
         except FileNotFoundError:
             pass
 
+        # Delete terrain map if present
+        _terrain_path = _os.path.expanduser("~/.vector_os_nano/terrain_map.npz")
+        try:
+            _os.remove(_terrain_path)
+            cleared = True
+        except FileNotFoundError:
+            pass
+
         if cleared:
             console.print(f"[dim]  Scene graph cleared. All rooms/objects forgotten.[/dim]")
         else:

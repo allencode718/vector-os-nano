@@ -457,7 +457,44 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /global_path_full
-      Value: false
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: FARPath
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz_path_topic
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: FARGraph
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz_graph_topic
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: FARNodes
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz_node_topic
+      Value: true
     - Class: rviz_default_plugins/Marker
       Enabled: true
       Name: TareMarker

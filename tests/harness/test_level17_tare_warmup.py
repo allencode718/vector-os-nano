@@ -195,11 +195,11 @@ class TestTareConfig:
         assert params["kExtendWayPointDistanceSmall"] <= 1.0, \
             f"kExtendWayPointDistanceSmall={params['kExtendWayPointDistanceSmall']} > 1.0m (unsafe for indoor)"
 
-    def test_auto_start_enabled(self):
-        """kAutoStart should be true."""
+    def test_auto_start_disabled(self):
+        """kAutoStart should be false — ExploreSkill sends /start_exploration."""
         cfg_path = os.path.expanduser(
             "~/Desktop/vector_os_nano/config/tare_go2_indoor.yaml"
         )
         with open(cfg_path) as f:
             content = f.read()
-        assert "kAutoStart : true" in content or "kAutoStart: true" in content
+        assert "kAutoStart : false" in content or "kAutoStart: false" in content

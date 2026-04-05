@@ -77,6 +77,79 @@ _SENSOR_Y: float = 0.0
 _SENSOR_Z: float = 0.2
 
 
+class TerrainAccumulator:
+    """Accumulates pointcloud data into a 2D voxel grid for terrain persistence."""
+
+    def __init__(self, voxel_size: float = 0.1, z_min: float = -0.5, z_max: float = 2.0):
+        self._voxel_size = voxel_size
+        self._grid: dict[tuple[int, int], float] = {}  # (ix, iy) → max_z
+        self._z_min = z_min
+        self._z_max = z_max
+        self._count = 0  # total points added
+
+    def add(self, points: list[tuple[float, float, float, float]]) -> None:
+        """Add pointcloud (x, y, z, intensity) to grid. Keep max z per voxel."""
+        for x, y, z, _ in points:
+            if z < self._z_min or z > self._z_max:
+                continue
+            ix = int(x / self._voxel_size)
+            iy = int(y / self._voxel_size)
+            key = (ix, iy)
+            if key not in self._grid or z > self._grid[key]:
+                self._grid[key] = z
+        self._count += len(points)
+
+    def save(self, path: str) -> bool:
+        """Save grid as numpy npz. Returns True on success."""
+        if not self._grid:
+            return False
+        import numpy as np
+        keys = list(self._grid.keys())
+        xs = np.array([k[0] for k in keys], dtype=np.int32)
+        ys = np.array([k[1] for k in keys], dtype=np.int32)
+        zs = np.array([self._grid[k] for k in keys], dtype=np.float32)
+        try:
+            import os
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            np.savez_compressed(path, ix=xs, iy=ys, z=zs, voxel_size=np.float32(self._voxel_size))
+            return True
+        except Exception:
+            return False
+
+    def load(self, path: str) -> bool:
+        """Load grid from npz. Returns True on success."""
+        try:
+            import numpy as np
+            data = np.load(path)
+            self._voxel_size = float(data['voxel_size'])
+            self._grid = {}
+            for ix, iy, z in zip(data['ix'], data['iy'], data['z']):
+                self._grid[(int(ix), int(iy))] = float(z)
+            return True
+        except Exception:
+            return False
+
+    def to_pointcloud(self) -> list[tuple[float, float, float, float]]:
+        """Convert grid back to pointcloud for publishing as /registered_scan."""
+        points = []
+        half = self._voxel_size / 2
+        for (ix, iy), z in self._grid.items():
+            x = ix * self._voxel_size + half
+            y = iy * self._voxel_size + half
+            # intensity = height above ground (same as bridge convention)
+            intensity = z
+            points.append((x, y, z, intensity))
+        return points
+
+    @property
+    def size(self) -> int:
+        return len(self._grid)
+
+    @property
+    def point_count(self) -> int:
+        return self._count
+
+
 class Go2VNavBridge(Node):
     """ROS2 node bridging MuJoCoGo2 to Vector Navigation Stack."""
 
@@ -156,11 +229,17 @@ class Go2VNavBridge(Node):
         self.create_timer(2.0, self._stuck_detector)             # 0.5 Hz
 
         # Stuck detector state — triggers /reset_waypoint when no progress
-        self._stuck_pos = None  # (x, y) at last check
-        self._stuck_count = 0   # consecutive checks with < 0.3m progress
+        self._stuck_pos = None       # (x, y) at last check
+        self._stuck_count = 0        # consecutive checks with < 0.3m progress
+        self._stuck_history: list = []  # (x, y) positions where /reset_waypoint was sent
         self._reset_waypoint_pub = self.create_publisher(
             PointStamped, "/reset_waypoint", 5
         )
+
+        # Wall escape state — two-phase: pure reverse then strafe+turn
+        self._wall_contact_time: float = 0.0    # seconds spent pinned (front_d<0.25 AND slow)
+        self._wall_escape_until: float = 0.0    # timestamp when escape maneuver ends
+        self._wall_escape_phase2: float = 0.0   # timestamp when phase 2 (strafe) starts
 
         # Scene graph visualization (1 Hz MarkerArray)
         self._scene_graph = None  # set externally by agent
@@ -178,6 +257,12 @@ class Go2VNavBridge(Node):
         self._diag_path_count: int = 0
         self.create_timer(10.0, self._log_diagnostics)  # 0.1 Hz
 
+        # Terrain persistence — accumulates pointcloud voxels during explore.
+        # Auto-saved every 30s while nav is active.
+        self._terrain_acc = TerrainAccumulator(voxel_size=0.1)
+        self._terrain_map_path = os.path.expanduser("~/.vector_os_nano/terrain_map.npz")
+        self.create_timer(30.0, self._auto_save_terrain)
+
         # Front obstacle detection from cached pointcloud
         self._cached_points: list = []
 
@@ -189,6 +274,32 @@ class Go2VNavBridge(Node):
             PointStamped, "/goal_point", 5
         )
         self.create_timer(1.0, self._check_nav_flag)
+
+        # Terrain replay: load saved map and publish to FAR on startup.
+        # CRITICAL TIMING: replay must wait for terrainAnalysis + FAR to start.
+        # launch_explore.sh startup order:
+        #   Bridge (0s) → localPlanner (7s) → sensorScan (11s) →
+        #   terrainAnalysis (12s) → FAR (15s) → TARE (17s) → RViz (19s)
+        # Replay before terrainAnalysis = data gets dropped = FAR has no graph.
+        # _REPLAY_DELAY: wait this many seconds after bridge init before replaying.
+        _REPLAY_DELAY = 20.0  # seconds — all nodes should be up by then
+        self._terrain_replay_points: list = []
+        self._terrain_replay_count: int = 0
+        self._terrain_replay_max: int = 50  # 5Hz × 10s = 50 frames (longer burst)
+        self._terrain_replay_start: float = time.time() + _REPLAY_DELAY
+        terrain_path = os.path.expanduser("~/.vector_os_nano/terrain_map.npz")
+        if os.path.isfile(terrain_path):
+            acc = TerrainAccumulator()
+            if acc.load(terrain_path):
+                self._terrain_replay_points = acc.to_pointcloud()
+                self.get_logger().info(
+                    f"Loaded terrain map: {acc.size} voxels from {terrain_path} "
+                    f"— replay starts in {_REPLAY_DELAY:.0f}s"
+                )
+                # Delayed replay timer — checks if it's time to start
+                self._terrain_replay_timer = self.create_timer(1.0, self._terrain_replay_gate)
+            else:
+                self.get_logger().warn(f"Failed to load terrain map from {terrain_path}")
 
         self.get_logger().info(
             "Go2VNavBridge started — /state_estimation, /registered_scan, /joy, /speed"
@@ -205,6 +316,65 @@ class Go2VNavBridge(Node):
             self._current_path = []
             self._go2.set_velocity(0.0, 0.0, 0.0)
             self.get_logger().info("Navigation DISABLED (flag file removed)")
+
+    def _terrain_replay_gate(self) -> None:
+        """Wait for all nav stack nodes to start, then switch to fast replay."""
+        if time.time() < self._terrain_replay_start:
+            return  # not yet — wait for terrainAnalysis + FAR to start
+        # Time to replay — switch from 1Hz gate to 5Hz replay
+        self._terrain_replay_timer.cancel()
+        self.get_logger().info(
+            f"Starting terrain replay: {len(self._terrain_replay_points)} points, "
+            f"{self._terrain_replay_max} frames at 5Hz"
+        )
+        self._terrain_replay_timer = self.create_timer(0.2, self._replay_terrain)
+
+    def _replay_terrain(self) -> None:
+        """Publish saved terrain as /registered_scan to seed FAR planner (5Hz burst)."""
+        if self._terrain_replay_count >= self._terrain_replay_max:
+            self._terrain_replay_timer.cancel()
+            self.get_logger().info(
+                f"Terrain replay complete: {self._terrain_replay_count} frames published"
+            )
+            return
+
+        if not self._terrain_replay_points:
+            self._terrain_replay_timer.cancel()
+            return
+
+        # Build PointCloud2 from saved points (same format as _publish_pointcloud)
+        now = self.get_clock().now().to_msg()
+        fields = [
+            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name="intensity", offset=12, datatype=PointField.FLOAT32, count=1),
+        ]
+
+        point_step = 16
+        data = bytearray()
+        for x, y, z, intensity in self._terrain_replay_points:
+            data.extend(struct.pack("ffff", x, y, z, intensity))
+
+        msg = PointCloud2()
+        msg.header.stamp = now
+        msg.header.frame_id = "map"
+        msg.height = 1
+        msg.width = len(self._terrain_replay_points)
+        msg.fields = fields
+        msg.is_bigendian = False
+        msg.point_step = point_step
+        msg.row_step = point_step * len(self._terrain_replay_points)
+        msg.data = bytes(data)
+        msg.is_dense = True
+        self._pc_pub.publish(msg)
+
+        self._terrain_replay_count += 1
+        if self._terrain_replay_count == 1:
+            self.get_logger().info(
+                f"Terrain replay: publishing {len(self._terrain_replay_points)} points "
+                f"({self._terrain_replay_max} frames at 5Hz)"
+            )
 
     def _joy_cb(self, msg: Joy) -> None:
         """Direct teleop: /joy axes → velocity (bypasses pathFollower).
@@ -337,6 +507,10 @@ class Go2VNavBridge(Node):
         self._pc_pub.publish(msg)
         self._diag_scan_count += 1
         self._cached_points = points  # cache for obstacle check
+
+        # Accumulate terrain for persistence (only during active navigation)
+        if self._nav_enabled:
+            self._terrain_acc.add(points)
 
     def _publish_scan(self) -> None:
         """Publish /scan (LaserScan) for compatibility."""
@@ -580,21 +754,64 @@ class Go2VNavBridge(Node):
         if time.time() < self._teleop_until:
             return
 
+        # --- Wall escape mode — two-phase: reverse first, then strafe ---
+        # Phase 1 (1s): pure reverse to clear wall contact
+        # Phase 2 (1.5s): strafe toward open side + turn away
+        # Head jammed against wall prevents lateral movement, so must back up first.
+        now = time.time()
+        if now < self._wall_escape_until:
+            if now < self._wall_escape_phase2:
+                # Phase 1: pure reverse — clear the wall
+                self._go2.set_velocity(-0.4, 0.0, 0.0)
+            else:
+                # Phase 2: strafe + turn toward open side
+                front_d, left_d, right_d = self._scan_surroundings()
+                escape_vy = 0.35 if right_d > left_d else -0.35
+                escape_vyaw = 0.5 if right_d > left_d else -0.5
+                self._go2.set_velocity(-0.15, escape_vy, escape_vyaw)
+            self._last_cmd_time = now
+            return
+
+        # --- Wall contact detection (accumulate time when stuck against wall) ---
+        front_d_check = self._check_front_obstacle()
+        if front_d_check < 0.25 and abs(self._pf_speed if hasattr(self, '_pf_speed') else 0.0) < 0.05:
+            self._wall_contact_time += 1.0 / 20.0  # 20 Hz tick
+        else:
+            self._wall_contact_time = 0.0
+
+        if self._wall_contact_time > 0.5:  # 0.5s — trigger before dog jams
+            front_d, left_d, right_d = self._scan_surroundings()
+            open_side = "right" if right_d > left_d else "left"
+            self.get_logger().warn(
+                f"Wall escape: reverse 1s then strafe {open_side}, front_d={front_d_check:.2f}"
+            )
+            self._wall_escape_phase2 = now + 1.0   # phase 1 = 1s pure reverse
+            self._wall_escape_until = now + 2.5     # total = 2.5s (1s reverse + 1.5s strafe)
+            self._wall_contact_time = 0.0
+            self._current_path = []
+            self._stuck_count = 0
+            return
+
         if not hasattr(self, '_pf_speed'):
             self._pf_speed = 0.0       # current forward speed
             self._pf_lat = 0.0         # current lateral speed
             self._pf_yawrate = 0.0     # current yaw rate
             self._pf_point_id = 0      # path progress index
 
-        _MAX_SPEED = 0.8               # m/s forward cruise
-        _MAX_LAT = 0.35                # m/s max lateral speed
-        _MAX_YAW_RATE = 1.2            # rad/s
-        _YAW_GAIN = 1.5                # P-gain for yaw
-        _STOP_YAW_GAIN = 2.0           # P-gain when nearly stopped
-        _LOOK_AHEAD = 0.6              # m lookahead
-        _STOP_DIS = 0.3                # m — stop within this
-        _SLOW_DWN_DIS = 1.5            # m — start decelerating
-        _ACCEL = 0.04                  # m/s per step @ 20Hz
+        # Constants ported from C++ pathFollower (pathFollower.cpp)
+        # Adapted for Go2 quadruped: lower max speed, same tracking precision
+        _MAX_SPEED = 0.8               # m/s forward cruise (C++: 1.0)
+        _MAX_LAT = 0.4                 # m/s max lateral speed
+        _MAX_YAW_RATE = 1.0            # rad/s = 57 deg/s (C++: 0.785, raised for quadruped spot turn)
+        _YAW_GAIN = 7.5                # P-gain for yaw (matches C++)
+        _STOP_YAW_GAIN = 7.5           # P-gain when nearly stopped (matches C++)
+        _DIR_DIFF_THRE = 0.1           # rad (~5.7°) heading gate (matches C++)
+        _OMNI_DIR_GOAL_THRE = 1.0      # m — near goal, allow large heading (C++)
+        _OMNI_DIR_DIFF_THRE = 1.5      # rad — heading limit near goal (C++)
+        _LOOK_AHEAD = 0.5              # m lookahead (matches C++)
+        _STOP_DIS = 0.2                # m — stop within this (matches C++)
+        _SLOW_DWN_DIS = 1.0            # m — start decelerating (matches C++)
+        _ACCEL = 0.05                  # m/s per step @ 20Hz (C++: 0.01@100Hz = same)
         _PATH_TIMEOUT = 8.0            # seconds before path considered stale
 
         has_path = (self._current_path
@@ -646,60 +863,102 @@ class Go2VNavBridge(Node):
 
         abs_err = abs(dir_diff)
 
-        # --- Target speed (forward) based on endpoint distance ---
+        # --- Target speed based on endpoint distance (matches C++) ---
         target_speed = _MAX_SPEED
         if end_dis < _SLOW_DWN_DIS:
             target_speed = _MAX_SPEED * (end_dis / _SLOW_DWN_DIS)
         if end_dis < _STOP_DIS or path_size <= 1:
             target_speed = 0.0
 
-        # --- Omnidirectional velocity decomposition ---
-        # ALWAYS prefer forward. Use lateral to assist. Reverse only last resort.
-        if abs_err < 0.52:
-            # < 30°: pure forward tracking, small yaw correction
-            vx = target_speed
-            vy = 0.0
-            vyaw = _YAW_GAIN * dir_diff
-        elif abs_err < 1.57:
-            # 30-90°: forward + lateral strafe toward path
-            # Forward tapers down as error grows
-            fwd_factor = max(0.2, 1.0 - (abs_err - 0.52) / 1.05)
-            vx = target_speed * fwd_factor
-            vy = math.copysign(min(_MAX_LAT, target_speed * 0.5), dir_diff)
-            vyaw = _YAW_GAIN * dir_diff
-        elif abs_err < 2.62:
-            # 90-150°: pure strafe + strong yaw to turn toward path
-            vx = 0.0
-            vy = math.copysign(_MAX_LAT, dir_diff)
-            vyaw = _STOP_YAW_GAIN * dir_diff
+        # --- Yaw rate: P-control (matches C++ pathFollower) ---
+        if abs(self._pf_speed) < 2.0 * _ACCEL:
+            vyaw = _STOP_YAW_GAIN * dir_diff  # stopped: faster turn
         else:
-            # > 150°: target is behind
-            if end_dis < 0.8:
-                # Very close behind — back up slowly
-                vx = -0.25
-                vy = 0.0
-                vyaw = 0.0
-            else:
-                # Far behind — turn in place to face it (don't reverse far)
-                vx = 0.0
-                vy = 0.0
-                vyaw = _STOP_YAW_GAIN * dir_diff
+            vyaw = _YAW_GAIN * dir_diff        # moving: proportional
 
-        # --- Reactive wall avoidance overlay ---
-        # IMPORTANT: localPlanner already plans collision-free paths. This layer
-        # only adds gentle repulsion — it must NOT block the planned path.
-        # If the planned path goes through a narrow gap, let the dog through.
+        # --- Heading-gated acceleration (KEY from C++ pathFollower) ---
+        # Only accelerate when heading is aligned. Otherwise decelerate to
+        # stop and turn in place. This prevents forward drift into walls
+        # when the robot is facing the wrong direction.
+        heading_ok = (
+            abs_err < _DIR_DIFF_THRE  # < 5.7° — well aligned
+            or (end_dis < _OMNI_DIR_GOAL_THRE and abs_err < _OMNI_DIR_DIFF_THRE)
+            # near goal: allow larger heading error for omnidirectional approach
+        )
+
+        if heading_ok and end_dis > _STOP_DIS:
+            # Heading aligned — accelerate toward target speed
+            # Cross-track correction via cos/sin decomposition (C++ omniDir mode)
+            # vx follows path direction, vy corrects lateral error
+            vx = target_speed * math.cos(dir_diff)
+            vy = -target_speed * math.sin(dir_diff)
+            # Clamp lateral to prevent gait instability on Go2
+            vy = max(-_MAX_LAT, min(_MAX_LAT, vy))
+        else:
+            # Heading NOT aligned — spot turn toward target.
+            # Quadruped-specific: MPC gait needs a small forward velocity to
+            # produce effective rotation. Pure vx=0 + vyaw causes the dog to
+            # "march in place" without actually turning. A tiny creep forward
+            # (0.05 m/s) engages the gait and enables smooth in-place turns.
+            vx = 0.05  # minimal creep to keep gait turning
+            vy = 0.0
+            # Boost yaw rate for faster spot turn (unclamped here, clamped below)
+            vyaw = _STOP_YAW_GAIN * dir_diff
+
+        # --- Cylinder body safety boundary (Go2 MJCF collision) ---
+        # The dog is NOT a point — it's a cylinder with radius ~0.19m.
+        # The path follower tracks the centerline, but the body extends around it.
+        # Obstacle distances are from the SENSOR (center), so we must subtract
+        # the body radius to get the actual gap between body surface and wall.
+        #
+        # MJCF collision: front 0.34m (head), side 0.19m (hip+thigh swing)
+        # Strategy: 3 zones based on gap between body surface and obstacle
+        #   Zone 1 (gap > 0.15m): normal — path follower tracks freely
+        #   Zone 2 (gap 0.05-0.15m): strong push away + slow down
+        #   Zone 3 (gap < 0.05m): hard stop/reverse — body about to contact
+        _BODY_FRONT = 0.34
+        _BODY_SIDE = 0.19
+        _COMFORT = 0.15      # desired gap between body surface and wall
+        _DANGER = 0.05       # gap below this = imminent contact
+
         front_d, left_d, right_d = self._scan_surroundings()
-        # Front: only slow below 0.3m, keep minimum 0.15 m/s to avoid stuck
-        if front_d < 0.3 and vx > 0:
-            vx = min(vx, 0.15)
-        # Lateral push away from walls (gentle, doesn't override path tracking)
-        if left_d < 0.4:
-            vy_push = -0.2 * (0.4 - left_d) / 0.4
-            vy = max(vy + vy_push, -_MAX_LAT)
-        if right_d < 0.4:
-            vy_push = 0.2 * (0.4 - right_d) / 0.4
-            vy = min(vy + vy_push, _MAX_LAT)
+
+        # Compute gaps (obstacle distance minus body extent)
+        front_gap = front_d - _BODY_FRONT
+        left_gap = left_d - _BODY_SIDE
+        right_gap = right_d - _BODY_SIDE
+
+        # Front: brake based on gap, not raw distance
+        if front_gap < _COMFORT and vx > 0:
+            if front_gap <= _DANGER:
+                vx = 0.0  # body surface ~0.05m from wall — full stop
+            else:
+                # Scale: full speed at _COMFORT gap, zero at _DANGER gap
+                vx *= (front_gap - _DANGER) / (_COMFORT - _DANGER)
+            # Also slow down forward speed when any side is tight
+            if left_gap < _DANGER or right_gap < _DANGER:
+                vx *= 0.3  # crawl when sides are tight
+
+        # Sides: push HARD away from wall when gap < comfort zone
+        if left_gap < _COMFORT:
+            if left_gap <= _DANGER:
+                # Imminent contact — maximum push right
+                vy = -_MAX_LAT
+            else:
+                # Proportional push right
+                push_strength = (_COMFORT - left_gap) / (_COMFORT - _DANGER)
+                vy = max(-_MAX_LAT, vy - push_strength * 0.4)
+            # Block any leftward motion
+            if vy > 0:
+                vy = 0.0
+        if right_gap < _COMFORT:
+            if right_gap <= _DANGER:
+                vy = _MAX_LAT
+            else:
+                push_strength = (_COMFORT - right_gap) / (_COMFORT - _DANGER)
+                vy = min(_MAX_LAT, vy + push_strength * 0.4)
+            if vy < 0:
+                vy = 0.0
 
         # --- Smooth acceleration ---
         if self._pf_speed < vx:
@@ -783,6 +1042,7 @@ class Go2VNavBridge(Node):
                 msg.point.y = odom.y
                 msg.point.z = odom.z
                 self._reset_waypoint_pub.publish(msg)
+                self._stuck_history.append((odom.x, odom.y))
                 self.get_logger().warn(
                     f"Stuck 4s at ({odom.x:.1f},{odom.y:.1f}) — "
                     f"sent /reset_waypoint to TARE"
@@ -792,12 +1052,45 @@ class Go2VNavBridge(Node):
                     f"Stuck 8s — backing up to escape"
                 )
                 # Back up for 1 second (will be overridden by next _follow_path)
-                self._go2.set_velocity(-0.25, 0.0, 0.0)
+                self._go2.set_velocity(-0.4, 0.0, 0.0)
                 self._last_cmd_time = time.time()
                 self._current_path = []  # clear stale path
                 self._stuck_count = 0  # reset for fresh detection
 
+                # Stuck loop detection: if last 3 resets all within 0.5m → aggressive escape
+                if len(self._stuck_history) >= 3:
+                    recent = self._stuck_history[-3:]
+                    cx = sum(p[0] for p in recent) / 3
+                    cy = sum(p[1] for p in recent) / 3
+                    if all(
+                        math.sqrt((p[0] - cx) ** 2 + (p[1] - cy) ** 2) < 0.5
+                        for p in recent
+                    ):
+                        self.get_logger().warn(
+                            "Stuck loop detected — aggressive escape: lateral strafe"
+                        )
+                        self._go2.set_velocity(-0.3, 0.3, 0.5)
+                        self._last_cmd_time = time.time()
+                        self._stuck_history.clear()
+                        self._current_path = []
+
         self._stuck_pos = cur
+
+    def save_terrain(self) -> bool:
+        """Save accumulated terrain map for next session."""
+        if self._terrain_acc.size == 0:
+            return False
+        ok = self._terrain_acc.save(self._terrain_map_path)
+        if ok:
+            self.get_logger().info(
+                f"Terrain map saved: {self._terrain_acc.size} voxels -> {self._terrain_map_path}"
+            )
+        return ok
+
+    def _auto_save_terrain(self) -> None:
+        """Auto-save terrain every 30s when nav is active and terrain has data."""
+        if self._nav_enabled and self._terrain_acc.size > 0:
+            self.save_terrain()
 
     def _publish_scene_graph_markers(self) -> None:
         """Publish scene graph visualization as MarkerArray (1 Hz)."""

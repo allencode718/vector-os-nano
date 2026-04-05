@@ -31,6 +31,10 @@ class Go2ROS2Proxy:
         self._last_odom: Any = None
         self._last_camera_frame: Any = None  # numpy (H, W, 3) uint8
         self._last_depth_frame: Any = None   # numpy (H, W) float32 metres
+        # Tracks the last time a /path message arrived from localPlanner.
+        # Used by navigate_to() FAR probe phase to detect whether FAR has a
+        # routing graph. Value 0.0 means no_path_received yet.
+        self._last_path_time: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -75,6 +79,15 @@ class Go2ROS2Proxy:
             )
             self._node.create_subscription(
                 Image, "/camera/depth", self._depth_cb, reliable_qos
+            )
+            # Subscribe to /way_point from FAR planner — used by navigate_to()
+            # to detect whether FAR has a routing graph and is actively routing.
+            # /way_point is ONLY published by FAR (or TARE during explore).
+            # /path from localPlanner is unreliable — it publishes even without
+            # a valid goal, causing false-positive FAR detection.
+            self._last_waypoint_time: float = 0.0
+            self._node.create_subscription(
+                PointStamped, "/way_point", self._waypoint_cb, 10
             )
 
             # Scene graph marker publisher (agent sets self._scene_graph)
@@ -159,6 +172,15 @@ class Go2ROS2Proxy:
             self._last_depth_frame = frame
         except Exception:
             pass
+
+    def _waypoint_cb(self, msg: Any) -> None:
+        """Record timestamp when FAR publishes a /way_point.
+
+        This is the ONLY reliable signal that FAR has a routing graph and is
+        actively routing to our /goal_point. localPlanner's /path is unreliable
+        because it publishes even without a valid goal from FAR.
+        """
+        self._last_waypoint_time = time.time()
 
     # ------------------------------------------------------------------
     # State accessors
@@ -309,18 +331,25 @@ class Go2ROS2Proxy:
     ) -> bool:
         """Navigate to (x, y) via FAR planner global route planning.
 
-        Publishes goal to /goal_point periodically (2Hz). FAR planner
-        computes a route through doorways and publishes intermediate
-        /way_point at 5Hz. localPlanner follows FAR's waypoints.
+        Two-phase strategy:
 
-        We do NOT publish to /way_point directly — that would override
-        FAR's routed intermediate points and cause the dog to go straight
-        into walls instead of through doorways.
+        Phase 1 — FAR probe (3 s, /goal_point only):
+          Publish /goal_point and monitor /path messages from localPlanner.
+          If FAR has a routing graph it will begin publishing /way_point, which
+          causes localPlanner to emit /path messages.  If no_path_received
+          within 3 s we perform an early_fallback: return False immediately so
+          NavigateSkill can fall through to dead-reckoning (door-aware routing).
 
-        FAR's 5Hz /way_point naturally overrides TARE's 1Hz exploration
+        Phase 2 — Full navigation (FAR responded):
+          Publish /goal_point only at 2 Hz. FAR routes through V-Graph and
+          publishes intermediate /way_point to localPlanner. We do NOT publish
+          /way_point directly — that would override FAR's door routing.
+
+        FAR's 5 Hz /way_point naturally overrides TARE's 1 Hz exploration
         waypoints during navigation.
 
-        Returns True when within 0.8m of goal, False on timeout.
+        Returns True when within 0.8 m of goal, False on timeout or when
+        FAR graph is unavailable.
         """
         if self._node is None:
             logger.warning("[NAV] navigate_to called but node not connected")
@@ -336,23 +365,63 @@ class Go2ROS2Proxy:
         self._nav_goal = (float(x), float(y))
         logger.info("[NAV] navigate_to(%.2f, %.2f) timeout=%.0fs", x, y, timeout)
 
-        deadline = time.time() + timeout
+        start_time = time.time()
         _ARRIVAL_DIST: float = 0.8
+        _FAR_PROBE_S: float = 5.0    # give FAR time to process goal
+        _MIN_PROBE_S: float = 2.0    # minimum wait even if /path seen early
 
-        while time.time() < deadline:
-            # Dual publish strategy:
-            # 1. /goal_point → FAR planner (global routing through doorways)
-            #    FAR publishes routed /way_point at 5Hz when it has a graph
-            # 2. /way_point → localPlanner direct (fallback when FAR has no graph)
-            #    localPlanner does local obstacle avoidance toward this point
-            # After exploration, FAR's 5Hz /way_point overrides our 2Hz.
-            # Before exploration, our direct /way_point gets the dog moving.
+        # Reset waypoint timestamp to ignore stale /way_point from TARE.
+        # /way_point is published by FAR (routing) or TARE (exploring).
+        # We only care about FAR's response to our /goal_point.
+        self._last_waypoint_time = 0.0
+
+        # Phase 1: probe FAR — send /goal_point, wait for /way_point response
+        # FAR only publishes /way_point when it has a V-Graph AND can route.
+        # localPlanner's /path is unreliable (publishes even without FAR).
+        probe_deadline = start_time + _FAR_PROBE_S
+        while time.time() < probe_deadline:
             self._publish_goal_point(x, y)
-            self._publish_waypoint(x, y)
+            time.sleep(0.5)
+            elapsed = time.time() - start_time
+            if self._last_waypoint_time > start_time and elapsed >= _MIN_PROBE_S:
+                logger.info("[NAV] FAR responded with /way_point after %.1fs", elapsed)
+                break  # FAR is routing
+
+        far_available = self._last_waypoint_time > start_time
+        if not far_available:
+            # FAR has no V-Graph — use door-chain fallback via localPlanner.
+            # Publish door waypoints to /way_point one by one. localPlanner
+            # handles obstacle avoidance for each segment.
+            logger.warning(
+                "[NAV] No FAR response after %.0fs — using door-chain fallback",
+                _FAR_PROBE_S,
+            )
+            remaining = timeout - (time.time() - start_time)
+            return self._navigate_via_doors(x, y, remaining)
+
+        # Phase 2: full navigation loop (FAR is routing)
+        # ONLY publish /goal_point — let FAR handle /way_point routing.
+        # FAR routes through doors via V-Graph and publishes intermediate
+        # /way_point at 5Hz.
+        deadline = start_time + timeout
+        _last_diag = 0.0
+        while time.time() < deadline:
+            self._publish_goal_point(x, y)
             time.sleep(0.5)
 
             pos = self.get_position()
             dist = math.sqrt((pos[0] - x) ** 2 + (pos[1] - y) ** 2)
+
+            elapsed = time.time() - start_time
+            if elapsed - _last_diag >= 5.0:
+                _last_diag = elapsed
+                wp_age = time.time() - self._last_waypoint_time if self._last_waypoint_time > 0 else -1
+                logger.info(
+                    "[NAV] t=%.0fs pos=(%.1f,%.1f) goal=(%.1f,%.1f) "
+                    "dist=%.1fm waypoint_age=%.1fs",
+                    elapsed, pos[0], pos[1], x, y, dist, wp_age,
+                )
+
             if dist < _ARRIVAL_DIST:
                 logger.info(
                     "[NAV] Arrived at (%.2f, %.2f) — distance=%.2fm", x, y, dist
@@ -361,7 +430,7 @@ class Go2ROS2Proxy:
                 return True
 
         logger.warning(
-            "[NAV] navigate_to(%.2f, %.2f) timed out after %.0fs", x, y, timeout
+            "[NAV] navigate_to(%.2f, %.2f) far_timeout after %.0fs", x, y, timeout
         )
         return False
 
@@ -381,6 +450,78 @@ class Go2ROS2Proxy:
             self._waypoint_pub.publish(msg)
         except Exception as exc:
             logger.warning("[NAV] Failed to publish waypoint: %s", exc)
+
+    def _navigate_via_doors(
+        self, x: float, y: float, timeout: float,
+    ) -> bool:
+        """Navigate to (x,y) by publishing door waypoints to /way_point.
+
+        When FAR has no V-Graph, this fallback routes through doorways
+        using the hardcoded room map. Each waypoint is sent to /way_point
+        so localPlanner provides obstacle avoidance for each segment.
+
+        Unlike dead-reckoning (turn+walk with no avoidance), this uses
+        the full localPlanner pipeline — the dog avoids walls on each leg.
+        """
+        from vector_os_nano.skills.navigate import (
+            _ROOM_CENTERS, _ROOM_DOORS, _detect_current_room,
+        )
+
+        pos = self.get_position()
+        src_room = _detect_current_room(float(pos[0]), float(pos[1]))
+        dst_room = _detect_current_room(float(x), float(y))
+
+        # Build waypoint chain: exit door → hallway → enter door → target
+        waypoints: list[tuple[float, float, str]] = []
+        if src_room != "hallway" and src_room != dst_room:
+            door = _ROOM_DOORS.get(src_room)
+            if door:
+                waypoints.append((door[0], door[1], f"{src_room}_door"))
+        if dst_room != "hallway":
+            door = _ROOM_DOORS.get(dst_room)
+            if door:
+                waypoints.append((door[0], door[1], f"{dst_room}_door"))
+        waypoints.append((x, y, "goal"))
+
+        logger.info(
+            "[NAV] Door-chain: %s → %s (%d waypoints)",
+            src_room, dst_room, len(waypoints),
+        )
+
+        deadline = time.time() + timeout
+        _SEGMENT_ARRIVAL = 1.5  # meters — close enough to advance to next wp
+
+        for wx, wy, label in waypoints:
+            logger.info("[NAV] Door-chain → %s (%.1f, %.1f)", label, wx, wy)
+
+            while time.time() < deadline:
+                self._publish_waypoint(wx, wy)
+                time.sleep(0.5)
+
+                pos = self.get_position()
+                dist = math.sqrt((pos[0] - wx) ** 2 + (pos[1] - wy) ** 2)
+
+                if dist < _SEGMENT_ARRIVAL:
+                    logger.info(
+                        "[NAV] Reached %s (dist=%.1fm)", label, dist,
+                    )
+                    break
+            else:
+                # Timeout on this segment
+                logger.warning(
+                    "[NAV] Door-chain timeout at %s", label,
+                )
+                return False
+
+        # Final arrival check
+        pos = self.get_position()
+        final_dist = math.sqrt((pos[0] - x) ** 2 + (pos[1] - y) ** 2)
+        arrived = final_dist < 2.0
+        logger.info(
+            "[NAV] Door-chain %s — final dist=%.1fm",
+            "arrived" if arrived else "failed", final_dist,
+        )
+        return arrived
 
     def _publish_goal_point(self, x: float, y: float) -> None:
         """Publish PointStamped to /goal_point (FAR planner input for routing)."""

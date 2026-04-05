@@ -53,6 +53,9 @@ trap cleanup EXIT INT TERM
 
 RVIZ_CFG="$REPO_DIR/config/vnav.rviz"
 
+# Clean stale nav flag from previous session (prevents unwanted movement on startup)
+rm -f /tmp/vector_nav_active 2>/dev/null
+
 echo "============================================"
 echo "  Go2 + TARE Autonomous Exploration"
 echo "============================================"

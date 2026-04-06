@@ -813,7 +813,7 @@ class Go2VNavBridge(Node):
         # Hysteresis: TRACK→TURN at 60°, TURN→TRACK at 30° (prevents oscillation)
         _MAX_SPEED = 0.8               # m/s forward cruise (open space)
         _MAX_LAT = 0.15                # m/s max lateral speed (conservative — falls at 0.25)
-        _MAX_YAW_RATE = 1.2            # rad/s max yaw rate
+        _MAX_YAW_RATE = 1.0            # rad/s max yaw rate
         _YAW_GAIN_TRACK = 4.0          # P-gain for yaw in tracking mode (gentle)
         _YAW_GAIN_TURN = 6.0           # P-gain for yaw in turn mode (snappy)
         _TRACK_THRE = 1.05             # rad (60°) — enter turn mode above this

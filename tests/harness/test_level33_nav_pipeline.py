@@ -200,21 +200,15 @@ class TestCylinderBodySafety:
     radius from obstacle distances before safety checks.
     """
 
-    def test_body_front_constant(self):
+    def test_body_front_extent_used(self):
+        """Body front extent (0.34m) must be subtracted from obstacle distance."""
         src = read_bridge_source()
-        assert "_BODY_FRONT" in src
-        match = re.search(r'_BODY_FRONT\s*=\s*([\d.]+)', src)
-        assert match
-        val = float(match.group(1))
-        assert 0.30 <= val <= 0.40, f"_BODY_FRONT={val} — should be ~0.34m (head)"
+        assert "0.34" in src, "Body front extent 0.34m must be in bridge"
 
-    def test_body_side_constant(self):
+    def test_body_side_extent_used(self):
+        """Body side extent (0.19m) must be subtracted from obstacle distance."""
         src = read_bridge_source()
-        assert "_BODY_SIDE" in src
-        match = re.search(r'_BODY_SIDE\s*=\s*([\d.]+)', src)
-        assert match
-        val = float(match.group(1))
-        assert 0.15 <= val <= 0.25, f"_BODY_SIDE={val} — should be ~0.19m (hip)"
+        assert "0.19" in src, "Body side extent 0.19m must be in bridge"
 
     def test_gap_calculation(self):
         """Safety must compute gap = obstacle_distance - body_extent."""

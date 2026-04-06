@@ -1,8 +1,8 @@
 # Vector OS Nano SDK — Progress
 
-**Last updated:** 2026-04-05
-**Version:** v1.3.0-dev (sim-to-real ready)
-**Branch:** master
+**Last updated:** 2026-04-06
+**Version:** v1.3.0-dev
+**Branch:** feat/sim-to-real-nav
 
 ## Architecture
 
@@ -14,54 +14,77 @@ vector-cli (agent process)          launch_explore.sh (subprocess)
                                        terrainAnalysis + RViz
 ```
 
-## Navigation Pipeline (sim-to-real ready)
+## Navigation Pipeline
 
 ```
-explore:
-  TARE autonomous → VLM identifies rooms → SceneGraph learns centers
-  Room transitions → SceneGraph learns door positions (add_door)
+Sim startup:
+  config/room_layout.yaml → SceneGraph (8 rooms, 7 doors, instant)
 
-proxy.navigate_to(x, y):
-  Phase 1 (5s): send /goal_point, detect FAR /way_point
-  Phase 2: FAR V-Graph routing (/goal_point only, FAR publishes /way_point)
+Explore:
+  TARE autonomous → position-based room detection (nearest_room)
+  Room transitions → SceneGraph learns doors (add_door)
+
+Navigate:
+  Phase 1 (5s): /goal_point → wait for FAR /way_point
+  Phase 2: FAR V-Graph routing (/goal_point only)
   Phase 3: door-chain fallback (SceneGraph BFS → /way_point → localPlanner)
-
-No hardcoded coordinates. SceneGraph is the only map source.
-Navigate without explore → "explore first" error.
 ```
 
-## SceneGraph (3-layer spatial memory)
-- Rooms: center positions learned via running average during explore
-- Doors: transition positions learned when VLM detects room change
-- Objects: VLM-detected items with world coordinates
-- Pathfinding: BFS on room adjacency for door-chain navigation
-- Persistence: YAML save/load (~/.vector_os_nano/scene_graph.yaml)
+## Path Follower (two-mode quadruped controller)
 
-## Path Follower (C++ pathFollower port)
-- Heading-gated acceleration (dirDiffThre=0.1 rad from C++)
-- Cross-track vy: vx=speed*cos(err), vy=-speed*sin(err)
-- Cylinder body safety: gap = obstacle_dist - body_radius (front 0.34m, side 0.19m)
-- Wall escape: two-phase (reverse 1s → strafe 1.5s)
-- Spot turn: vx=0.05 creep for quadruped gait
+```
+TRACK mode (heading error < 60°):
+  vx = speed × cos(err), vy = -speed × sin(err)
+  Space-aware: open → 0.8 m/s, tight → proportional slowdown
+  Gentle yaw correction (gain=4.0, smoothed 0.04/tick)
+
+TURN mode (heading error > 60°, hysteresis at 30°):
+  vx = 0.05 (gait creep), vy = 0 (no strafe)
+  Snappy rotation (gain=6.0, smoothed 0.08/tick)
+
+All axes smoothed: vx 0.04/tick, vy 0.02/tick, vyaw mode-dependent
+Deceleration 2x faster than acceleration
+Cylinder body safety: 3 zones (comfort/push/danger) based on gap
+```
+
+## SceneGraph
+- Rooms + doors from config (sim) or exploration (real)
+- APIs: add_door(), get_door(), get_door_chain() BFS, nearest_room()
+- Persistence: YAML save/load
+- load_layout(): seed from config file on startup
 
 ## Terrain Persistence
-- TerrainAccumulator: 2D voxel grid saved to ~/.vector_os_nano/terrain_map.npz
+- TerrainAccumulator: 2D voxel grid → ~/.vector_os_nano/terrain_map.npz
 - Auto-save every 30s during explore
-- Delayed replay (20s) on startup to seed FAR
-- Replay publishes to /registered_scan + /terrain_map + /terrain_map_ext (bypasses range filter)
+- Replay to /registered_scan + /terrain_map + /terrain_map_ext
 
-## Harness Tests: 700+ total
+## Local VLM (Ollama)
+- Ollama + gemma4:e4b installed (RTX 5080 16GB)
+- VLM backend switchable via VECTOR_VLM_URL env var
+- Auto-look disabled for sim (room detection is config-based)
+- Available for real-world scene description when needed
+
+## Harness Tests: 750+ total
 | Suite | Tests | Status |
 |-------|-------|--------|
 | Locomotion L0-L4 | 26 | pass |
 | Agent+Go2 | 5 | pass |
 | VLM+Scene L0-L9 | 200+ | pass |
 | Nav L17-L33 | 247 | pass |
-| Sim-to-Real L34-L36 | 78 | pass |
-| Other (robustness, TARE, etc.) | 150+ | pass |
+| Sim-to-Real L34-L38 | 120+ | pass |
+| Other | 150+ | pass |
+
+## Sim-to-Real Design
+
+| Component | Sim (current) | Real (future) |
+|-----------|--------------|---------------|
+| Localization | MuJoCo ground-truth | SLAM (arise_slam_mid360) |
+| Room detection | config/room_layout.yaml | SLAM + semantic understanding |
+| Room identification | Position-based (instant) | VLM or topological segmentation |
+| VLM | Ollama gemma4:e4b (disabled for sim) | Active for scene description |
+| Interface | /state_estimation (same) | /state_estimation (same) |
 
 ## Known Limitations
 - TARE sometimes stops at 7/8 rooms
-- VLM room identification accuracy affects door/room learning quality
-- First navigate requires explore (by design — no hardcoded fallback)
-- SLAM integration not yet tested (interface compatible via /state_estimation)
+- Real-world room detection needs SLAM + spatial understanding (not yet implemented)
+- Open WebUI installed but Docker needs reboot for iptables fix

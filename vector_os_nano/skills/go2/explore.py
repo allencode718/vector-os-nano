@@ -19,6 +19,7 @@ The exploration thread:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import shutil
 import signal
@@ -29,10 +30,6 @@ from typing import Any
 
 from vector_os_nano.core.skill import SkillContext, skill
 from vector_os_nano.core.types import SkillResult
-from vector_os_nano.skills.navigate import (
-    _ROOM_CENTERS,
-    _detect_current_room,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -452,7 +449,7 @@ def _exploration_loop(base: Any, has_bridge: bool = True) -> None:
     _explore_running = True
     _explore_cancel.clear()
 
-    _emit("started", {"total_rooms": len(_ROOM_CENTERS)})
+    _emit("started", {"total_rooms": 0})  # unknown — TARE handles coverage
 
     # Seed walk: give TARE initial scan data by moving the robot forward briefly.
     # TARE requires 5 scans per keypose at 10 Hz (0.5 s minimum) before it can
@@ -499,6 +496,11 @@ def _exploration_loop(base: Any, has_bridge: bool = True) -> None:
     # Reference: launch_explore.sh does the same: seed once, then hands off
     # to TARE entirely. The nav stack drives at up to 0.8 m/s on its own.
 
+    _prev_room: str | None = None
+    _last_vlm_check: float = 0.0
+    _VLM_ROOM_INTERVAL: float = 10.0  # seconds between VLM room ID attempts
+    _NEW_ROOM_DIST: float = 3.0       # meters — if farther than this, probably new room
+
     try:
         while not _explore_cancel.is_set():
             try:
@@ -507,24 +509,67 @@ def _exploration_loop(base: Any, has_bridge: bool = True) -> None:
                     _emit("stopped", {"reason": "robot_fell", "rooms": sorted(_explore_visited)})
                     break
 
-                room = _detect_current_room(float(pos[0]), float(pos[1]))
+                x, y = float(pos[0]), float(pos[1])
+                room = _spatial_memory.nearest_room(x, y) if _spatial_memory else None
+
+                # --- VLM room discovery (solves bootstrap + new-territory) ---
+                # nearest_room only knows rooms already in SceneGraph.
+                # When SceneGraph is empty or robot is far from known rooms,
+                # VLM must identify the room to populate SceneGraph.
+                needs_vlm = False
+                if room is None:
+                    needs_vlm = True  # bootstrap: SceneGraph empty
+                elif _spatial_memory is not None:
+                    room_node = _spatial_memory.get_room(room)
+                    if room_node:
+                        dist = math.sqrt(
+                            (x - room_node.center_x) ** 2
+                            + (y - room_node.center_y) ** 2
+                        )
+                        if dist > _NEW_ROOM_DIST:
+                            needs_vlm = True  # far from known room
+
+                now_t = time.time()
+                if needs_vlm and _auto_look is not None and (now_t - _last_vlm_check) > _VLM_ROOM_INTERVAL:
+                    _last_vlm_check = now_t
+                    try:
+                        obs = _auto_look(room or "unknown")
+                        if obs and obs.get("room") and obs["room"] != "unknown":
+                            vlm_room = obs["room"]
+                            if vlm_room != room:
+                                logger.info(
+                                    "[EXPLORE] VLM discovered room: %s at (%.1f, %.1f)",
+                                    vlm_room, x, y,
+                                )
+                                room = vlm_room
+                    except Exception as exc:
+                        logger.warning("[EXPLORE] VLM room check failed: %s", exc)
 
                 # Record EVERY position sample in SceneGraph.
                 # visit() uses running average → center converges as
-                # robot moves through the room. Critical for sim-to-real:
-                # navigation targets come from these learned positions.
-                if _spatial_memory is not None:
+                # robot moves through the room.
+                if room is not None and _spatial_memory is not None:
                     try:
-                        _spatial_memory.visit(room, float(pos[0]), float(pos[1]))
+                        _spatial_memory.visit(room, x, y)
                     except Exception:
                         pass
 
-                if room not in _explore_visited:
+                # Door learning: detect room transitions and record door position.
+                if _prev_room is not None and room is not None and room != _prev_room:
+                    if _spatial_memory is not None:
+                        _spatial_memory.add_door(_prev_room, room, x, y)
+                        logger.info(
+                            "[EXPLORE] Door learned: %s <-> %s at (%.1f, %.1f)",
+                            _prev_room, room, x, y,
+                        )
+                _prev_room = room
+
+                if room is not None and room not in _explore_visited:
                     _explore_visited.add(room)
                     _emit("room_entered", {
                         "room": room,
                         "visited": len(_explore_visited),
-                        "total": len(_ROOM_CENTERS),
+                        "total": len(_explore_visited),
                         "all_rooms": sorted(_explore_visited),
                     })
 
@@ -558,13 +603,9 @@ def _exploration_loop(base: Any, has_bridge: bool = True) -> None:
 
             _explore_cancel.wait(timeout=_POSITION_SAMPLE_INTERVAL)
 
-        if len(_explore_visited) >= len(_ROOM_CENTERS):
-            # All rooms visited — stop TARE but keep FAR + localPlanner alive
-            # for subsequent point-to-point navigation.
-            stop_tare_only()
-            _emit("completed", {"rooms": sorted(_explore_visited)})
-        elif not _explore_cancel.is_set():
-            stop_tare_only()
+        if not _explore_cancel.is_set():
+            # Exploration runs until user stops or _explore_cancel is set.
+            # TARE autonomously decides coverage completeness.
             _emit("stopped", {"reason": "finished", "rooms": sorted(_explore_visited)})
 
     finally:
@@ -642,7 +683,8 @@ class ExploreSkill:
                     room_id = vlm.identify_room(frame)
                     detected_room = room_id.room if room_id.room != "unknown" else room
 
-                    if spatial_memory is not None:
+                    # Never record "unknown" to SceneGraph — it pollutes nearest_room()
+                    if spatial_memory is not None and detected_room != "unknown":
                         if hasattr(spatial_memory, "observe_with_viewpoint"):
                             spatial_memory.observe_with_viewpoint(
                                 detected_room, float(pos[0]), float(pos[1]),

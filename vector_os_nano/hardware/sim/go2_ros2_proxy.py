@@ -456,43 +456,45 @@ class Go2ROS2Proxy:
     ) -> bool:
         """Navigate to (x,y) by publishing door waypoints to /way_point.
 
-        When FAR has no V-Graph, this fallback routes through doorways
-        using the hardcoded room map. Each waypoint is sent to /way_point
-        so localPlanner provides obstacle avoidance for each segment.
-
-        Unlike dead-reckoning (turn+walk with no avoidance), this uses
-        the full localPlanner pipeline — the dog avoids walls on each leg.
+        Uses SceneGraph door chain instead of hardcoded room map.
+        localPlanner provides obstacle avoidance for each segment.
         """
-        from vector_os_nano.skills.navigate import (
-            _ROOM_CENTERS, _ROOM_DOORS, _detect_current_room,
-        )
+        sg = self._scene_graph
+        if sg is None or not hasattr(sg, "get_door_chain"):
+            logger.warning("[NAV] No SceneGraph available for door-chain navigation")
+            return False
 
         pos = self.get_position()
-        src_room = _detect_current_room(float(pos[0]), float(pos[1]))
-        dst_room = _detect_current_room(float(x), float(y))
+        src_room = sg.nearest_room(float(pos[0]), float(pos[1]))
+        dst_room = sg.nearest_room(float(x), float(y))
 
-        # Build waypoint chain: exit door → hallway → enter door → target
-        waypoints: list[tuple[float, float, str]] = []
-        if src_room != "hallway" and src_room != dst_room:
-            door = _ROOM_DOORS.get(src_room)
-            if door:
-                waypoints.append((door[0], door[1], f"{src_room}_door"))
-        if dst_room != "hallway":
-            door = _ROOM_DOORS.get(dst_room)
-            if door:
-                waypoints.append((door[0], door[1], f"{dst_room}_door"))
-        waypoints.append((x, y, "goal"))
+        if src_room is None or dst_room is None:
+            logger.warning(
+                "[NAV] Cannot determine rooms for door-chain: src=%s dst=%s",
+                src_room, dst_room,
+            )
+            return False
+
+        # Get waypoint chain from SceneGraph BFS
+        chain = sg.get_door_chain(src_room, dst_room)
+        if not chain:
+            logger.warning("[NAV] No door chain found: %s -> %s", src_room, dst_room)
+            return False
+
+        # Replace final waypoint with exact goal coordinates
+        # (door chain ends at dst room center, but actual goal may differ)
+        chain[-1] = (x, y, chain[-1][2])
 
         logger.info(
-            "[NAV] Door-chain: %s → %s (%d waypoints)",
-            src_room, dst_room, len(waypoints),
+            "[NAV] Door-chain: %s -> %s (%d waypoints)",
+            src_room, dst_room, len(chain),
         )
 
         deadline = time.time() + timeout
-        _SEGMENT_ARRIVAL = 1.5  # meters — close enough to advance to next wp
+        _SEGMENT_ARRIVAL = 1.5  # meters
 
-        for wx, wy, label in waypoints:
-            logger.info("[NAV] Door-chain → %s (%.1f, %.1f)", label, wx, wy)
+        for wx, wy, label in chain:
+            logger.info("[NAV] Door-chain -> %s (%.1f, %.1f)", label, wx, wy)
 
             while time.time() < deadline:
                 self._publish_waypoint(wx, wy)
@@ -502,15 +504,10 @@ class Go2ROS2Proxy:
                 dist = math.sqrt((pos[0] - wx) ** 2 + (pos[1] - wy) ** 2)
 
                 if dist < _SEGMENT_ARRIVAL:
-                    logger.info(
-                        "[NAV] Reached %s (dist=%.1fm)", label, dist,
-                    )
+                    logger.info("[NAV] Reached %s (dist=%.1fm)", label, dist)
                     break
             else:
-                # Timeout on this segment
-                logger.warning(
-                    "[NAV] Door-chain timeout at %s", label,
-                )
+                logger.warning("[NAV] Door-chain timeout at %s", label)
                 return False
 
         # Final arrival check
@@ -518,7 +515,7 @@ class Go2ROS2Proxy:
         final_dist = math.sqrt((pos[0] - x) ** 2 + (pos[1] - y) ** 2)
         arrived = final_dist < 2.0
         logger.info(
-            "[NAV] Door-chain %s — final dist=%.1fm",
+            "[NAV] Door-chain %s -- final dist=%.1fm",
             "arrived" if arrived else "failed", final_dist,
         )
         return arrived

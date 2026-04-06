@@ -76,9 +76,9 @@ class TestFollowerConstants:
         assert c.get("SLOW_DWN_DIS", 0) == pytest.approx(1.0, abs=0.1)
 
     def test_dir_diff_threshold_exists(self):
-        """DIR_DIFF_THRE should be ~0.1 rad (C++ line 59)."""
+        """DIR_DIFF_THRE ~0.35 rad (relaxed for quadruped omni-walk, C++ was 0.1 for wheeled)."""
         c = self._get_constants()
-        assert c.get("DIR_DIFF_THRE", 0) == pytest.approx(0.1, abs=0.02)
+        assert c.get("DIR_DIFF_THRE", 0) == pytest.approx(0.35, abs=0.05)
 
     def test_omni_dir_goal_threshold(self):
         """OMNI_DIR_GOAL_THRE should be ~1.0m (C++ line 60)."""
@@ -117,15 +117,17 @@ class TestHeadingGate:
             "No vx=0 when heading misaligned — robot will drift into walls"
         )
 
-    def test_heading_gate_threshold_tight(self):
-        """Heading threshold should be < 15° to prevent wall approach."""
+    def test_heading_gate_threshold_quadruped(self):
+        """Heading threshold ~20° for quadruped (can omni-walk through doorways)."""
         src = read_bridge_source()
         match = re.search(r'DIR_DIFF_THRE\s*=\s*([\d.]+)', src)
         assert match, "DIR_DIFF_THRE not found"
         thre = float(match.group(1))
-        assert thre <= 0.26, (  # 15° = 0.26 rad
-            f"DIR_DIFF_THRE={thre} rad ({math.degrees(thre):.0f}°) too loose — "
-            f"should be <= 15° to prevent wall approach"
+        # Quadruped: 20° allows forward progress while turning (cos(20°)=0.94)
+        # Too loose (>45°) risks wall approach; too tight (<10°) causes doorway spinning
+        assert 0.15 <= thre <= 0.52, (
+            f"DIR_DIFF_THRE={thre} rad ({math.degrees(thre):.0f}°) — "
+            f"should be 10-30° for quadruped omni-walk"
         )
 
 
@@ -181,7 +183,7 @@ class TestFollowerBehavior:
         speed: float = 0.0,    # current speed
     ) -> dict:
         """Simulate one step of the heading-gated follower."""
-        _DIR_DIFF_THRE = 0.1
+        _DIR_DIFF_THRE = 0.35
         _OMNI_DIR_GOAL_THRE = 1.0
         _OMNI_DIR_DIFF_THRE = 1.5
         _MAX_SPEED = 0.8

@@ -183,6 +183,12 @@ class Go2VNavBridge(Node):
         self._pc_pub = self.create_publisher(
             PointCloud2, "/registered_scan", reliable_qos
         )
+        self._terrain_map_pub = self.create_publisher(
+            PointCloud2, "/terrain_map", reliable_qos
+        )
+        self._terrain_map_ext_pub = self.create_publisher(
+            PointCloud2, "/terrain_map_ext", reliable_qos
+        )
         self._scan_pub = self.create_publisher(
             LaserScanMsg, "/scan", reliable_qos
         )
@@ -368,6 +374,8 @@ class Go2VNavBridge(Node):
         msg.data = bytes(data)
         msg.is_dense = True
         self._pc_pub.publish(msg)
+        self._terrain_map_pub.publish(msg)
+        self._terrain_map_ext_pub.publish(msg)
 
         self._terrain_replay_count += 1
         if self._terrain_replay_count == 1:
@@ -805,7 +813,7 @@ class Go2VNavBridge(Node):
         _MAX_YAW_RATE = 1.0            # rad/s = 57 deg/s (C++: 0.785, raised for quadruped spot turn)
         _YAW_GAIN = 7.5                # P-gain for yaw (matches C++)
         _STOP_YAW_GAIN = 7.5           # P-gain when nearly stopped (matches C++)
-        _DIR_DIFF_THRE = 0.1           # rad (~5.7°) heading gate (matches C++)
+        _DIR_DIFF_THRE = 0.35          # rad (~20°) heading gate (C++ 0.1 for wheeled; relaxed for quadruped omni-walk)
         _OMNI_DIR_GOAL_THRE = 1.0      # m — near goal, allow large heading (C++)
         _OMNI_DIR_DIFF_THRE = 1.5      # rad — heading limit near goal (C++)
         _LOOK_AHEAD = 0.5              # m lookahead (matches C++)
@@ -896,11 +904,11 @@ class Go2VNavBridge(Node):
             vy = max(-_MAX_LAT, min(_MAX_LAT, vy))
         else:
             # Heading NOT aligned — spot turn toward target.
-            # Quadruped-specific: MPC gait needs a small forward velocity to
+            # Quadruped-specific: MPC gait needs forward velocity to
             # produce effective rotation. Pure vx=0 + vyaw causes the dog to
-            # "march in place" without actually turning. A tiny creep forward
-            # (0.05 m/s) engages the gait and enables smooth in-place turns.
-            vx = 0.05  # minimal creep to keep gait turning
+            # "march in place" without actually turning. A creep forward
+            # engages the gait and enables smooth turns while making progress.
+            vx = 0.15  # creep forward while turning (was 0.05 — too slow in doorways)
             vy = 0.0
             # Boost yaw rate for faster spot turn (unclamped here, clamped below)
             vyaw = _STOP_YAW_GAIN * dir_diff

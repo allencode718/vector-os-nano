@@ -153,7 +153,7 @@ class Go2VLMPerception:
             self._base_url: str = _LOCAL_VLM_URL  # type: ignore[assignment]
             self._model: str = _LOCAL_VLM_MODEL or "gemma4:e4b"
             self._local: bool = True
-            self._timeout: float = 120.0  # local: first call loads model (~30s)
+            self._timeout: float = 45.0  # local: first call loads model (~30s), retry handles it
             logger.info("VLM: local Ollama at %s model=%s", self._base_url, self._model)
         else:
             api_key: str | None = cfg.get("api_key") or os.environ.get(

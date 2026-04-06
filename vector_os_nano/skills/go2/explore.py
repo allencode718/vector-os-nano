@@ -512,10 +512,10 @@ def _exploration_loop(base: Any, has_bridge: bool = True) -> None:
                 x, y = float(pos[0]), float(pos[1])
                 room = _spatial_memory.nearest_room(x, y) if _spatial_memory else None
 
-                # --- VLM room discovery (solves bootstrap + new-territory) ---
-                # nearest_room only knows rooms already in SceneGraph.
+                # --- VLM room discovery (non-blocking) ---
                 # When SceneGraph is empty or robot is far from known rooms,
-                # VLM must identify the room to populate SceneGraph.
+                # fire VLM in a background thread. The callback writes to
+                # SceneGraph; next loop iteration picks it up via nearest_room.
                 needs_vlm = False
                 if room is None:
                     needs_vlm = True  # bootstrap: SceneGraph empty
@@ -532,18 +532,17 @@ def _exploration_loop(base: Any, has_bridge: bool = True) -> None:
                 now_t = time.time()
                 if needs_vlm and _auto_look is not None and (now_t - _last_vlm_check) > _VLM_ROOM_INTERVAL:
                     _last_vlm_check = now_t
-                    try:
-                        obs = _auto_look(room or "unknown")
-                        if obs and obs.get("room") and obs["room"] != "unknown":
-                            vlm_room = obs["room"]
-                            if vlm_room != room:
+                    def _vlm_discover(fallback: str = room or "unknown") -> None:
+                        try:
+                            obs = _auto_look(fallback)
+                            if obs and obs.get("room") and obs["room"] != "unknown":
                                 logger.info(
-                                    "[EXPLORE] VLM discovered room: %s at (%.1f, %.1f)",
-                                    vlm_room, x, y,
+                                    "[EXPLORE] VLM discovered room: %s",
+                                    obs["room"],
                                 )
-                                room = vlm_room
-                    except Exception as exc:
-                        logger.warning("[EXPLORE] VLM room check failed: %s", exc)
+                        except Exception as exc:
+                            logger.warning("[EXPLORE] VLM room check failed: %s", exc)
+                    threading.Thread(target=_vlm_discover, daemon=True).start()
 
                 # Record EVERY position sample in SceneGraph.
                 # visit() uses running average → center converges as

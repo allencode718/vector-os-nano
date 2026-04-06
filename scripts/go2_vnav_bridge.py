@@ -805,24 +805,20 @@ class Go2VNavBridge(Node):
             self._pf_lat = 0.0         # current lateral speed
             self._pf_yawrate = 0.0     # current yaw rate
             self._pf_point_id = 0      # path progress index
-            self._pf_slow_time = 0.0   # seconds spent at low speed (adaptive gate)
 
-        # Constants ported from C++ pathFollower (pathFollower.cpp)
-        # Adapted for Go2 quadruped: lower max speed, same tracking precision
-        _MAX_SPEED = 0.8               # m/s forward cruise (C++: 1.0)
+        # Constants — adapted from C++ pathFollower for quadruped omni-walk.
+        # Key difference from wheeled: Go2 can strafe, so heading gate is wide.
+        # cos/sin decomposition handles all heading errors up to the gate.
+        _MAX_SPEED = 0.8               # m/s forward cruise
         _MAX_LAT = 0.4                 # m/s max lateral speed
-        _MAX_YAW_RATE = 1.0            # rad/s = 57 deg/s (C++: 0.785, raised for quadruped spot turn)
-        _YAW_GAIN = 7.5                # P-gain for yaw (matches C++)
-        _STOP_YAW_GAIN = 7.5           # P-gain when nearly stopped (matches C++)
-        _DIR_DIFF_THRE = 0.35          # rad (~20°) heading gate (C++ 0.1 for wheeled; relaxed for quadruped omni-walk)
-        _DIR_DIFF_MAX = 0.8            # rad (~45°) max relaxed gate when slow/stuck near furniture
-        _OMNI_DIR_GOAL_THRE = 1.0      # m — near goal, allow large heading (C++)
-        _OMNI_DIR_DIFF_THRE = 1.5      # rad — heading limit near goal (C++)
-        _LOOK_AHEAD = 0.5              # m lookahead base (matches C++)
-        _LOOK_AHEAD_MAX = 1.5          # m lookahead when slow (skip tight curves)
-        _STOP_DIS = 0.2                # m — stop within this (matches C++)
-        _SLOW_DWN_DIS = 1.0            # m — start decelerating (matches C++)
-        _ACCEL = 0.05                  # m/s per step @ 20Hz (C++: 0.01@100Hz = same)
+        _MAX_YAW_RATE = 1.0            # rad/s max yaw rate
+        _YAW_GAIN = 7.5                # P-gain for yaw
+        _STOP_YAW_GAIN = 7.5           # P-gain when nearly stopped
+        _DIR_DIFF_THRE = 1.0           # rad (~57°) wide gate for quadruped omni-walk
+        _LOOK_AHEAD = 0.8              # m lookahead (wider than C++ 0.5 to smooth curves)
+        _STOP_DIS = 0.2                # m — stop within this
+        _SLOW_DWN_DIS = 1.0            # m — start decelerating
+        _ACCEL = 0.05                  # m/s per step @ 20Hz
         _PATH_TIMEOUT = 8.0            # seconds before path considered stale
 
         has_path = (self._current_path
@@ -853,26 +849,11 @@ class Go2VNavBridge(Node):
         ex, ey = path[-1]
         end_dis = math.sqrt((ex - rx)**2 + (ey - ry)**2)
 
-        # --- Adaptive slow-time tracker ---
-        # Track how long robot has been moving slowly. Used to progressively
-        # relax heading gate and increase lookahead near furniture/doorways.
-        # Prevents the stop-turn-stop-turn loop that causes spinning in place.
-        if abs(self._pf_speed) < 0.15:
-            self._pf_slow_time += 1.0 / 20.0  # 20Hz tick
-        else:
-            self._pf_slow_time = max(0.0, self._pf_slow_time - 0.1)  # decay
-
-        # --- Adaptive lookahead: look further ahead when slow ---
-        # Near furniture, the path has tight curves. Looking further ahead
-        # smooths out direction changes, reducing heading oscillation.
-        slow_factor = min(1.0, self._pf_slow_time / 3.0)  # ramp over 3s
-        look_ahead = _LOOK_AHEAD + slow_factor * (_LOOK_AHEAD_MAX - _LOOK_AHEAD)
-
         # --- Progressive lookahead ---
         while self._pf_point_id < path_size - 1:
             px, py = path[self._pf_point_id]
             d = math.sqrt((px - rx)**2 + (py - ry)**2)
-            if d < look_ahead:
+            if d < _LOOK_AHEAD:
                 self._pf_point_id += 1
             else:
                 break
@@ -902,44 +883,24 @@ class Go2VNavBridge(Node):
         else:
             vyaw = _YAW_GAIN * dir_diff        # moving: proportional
 
-        # --- Heading-gated acceleration (adapted from C++ pathFollower) ---
-        # Progressively relax the heading gate when the robot is slow/stuck.
-        # Normal: 20° — precise path tracking
-        # After 2s slow: ramps to 45° — push through tight spaces
-        # This prevents the stop-turn-stop-turn loop near furniture/doorways.
-        adaptive_dir_thre = _DIR_DIFF_THRE + slow_factor * (_DIR_DIFF_MAX - _DIR_DIFF_THRE)
-
-        heading_ok = (
-            abs_err < adaptive_dir_thre
-            or (end_dis < _OMNI_DIR_GOAL_THRE and abs_err < _OMNI_DIR_DIFF_THRE)
-        )
+        # --- Omnidirectional heading gate (quadruped-adapted) ---
+        # Wide gate (57°): cos/sin decomposition naturally reduces forward
+        # speed and adds lateral correction as heading error increases.
+        # At 57°: vx = 0.54*speed, vy = 0.84*speed — still good progress.
+        # Spot turn only for >57° errors (U-turns, rare during exploration).
+        heading_ok = abs_err < _DIR_DIFF_THRE
 
         if heading_ok and end_dis > _STOP_DIS:
-            # Heading aligned — accelerate toward target speed
-            # Cross-track correction via cos/sin decomposition (C++ omniDir mode)
-            # vx follows path direction, vy corrects lateral error
+            # Omni-walk: decompose speed into forward + lateral components.
+            # cos(err) → forward, sin(err) → lateral correction.
             vx = target_speed * math.cos(dir_diff)
             vy = -target_speed * math.sin(dir_diff)
-            # Clamp lateral to prevent gait instability on Go2
             vy = max(-_MAX_LAT, min(_MAX_LAT, vy))
         else:
-            # Heading NOT aligned — spot turn toward target.
-            # --- Tight-space 3-point turn ---
-            # If heading error is large AND front is blocked AND we've been
-            # slow for 2+ seconds: REVERSE to clear the obstacle, then turn.
-            # This handles kitchen islands, furniture corners, narrow gaps
-            # where the robot can't turn forward but has space behind it.
-            front_clear = self._check_front_obstacle()
-            if abs_err > 0.6 and front_clear < 0.5 and self._pf_slow_time > 2.0:
-                vx = -0.25  # reverse while turning (3-point turn)
-                vy = 0.0
-            else:
-                # Normal spot turn: scale creep by heading alignment.
-                # At large errors (>45°) minimal forward to avoid wall push.
-                creep_scale = max(0.0, 1.0 - abs_err / 0.8)
-                vx = 0.05 + 0.10 * creep_scale
-                vy = 0.0
-            # Yaw always applied — turn during both forward creep and reverse
+            # Spot turn: heading error > 57° (U-turn or target behind).
+            # Minimal creep to keep MPC gait engaged for rotation.
+            vx = 0.05
+            vy = 0.0
             vyaw = _STOP_YAW_GAIN * dir_diff
 
         # --- Cylinder body safety boundary (Go2 MJCF collision) ---
@@ -1017,14 +978,12 @@ class Go2VNavBridge(Node):
             self._follow_count = 0
         self._follow_count += 1
         if self._follow_count % 20 == 0:
-            adapt = f" ADAPT={math.degrees(adaptive_dir_thre):.0f}° LA={look_ahead:.1f}" if self._pf_slow_time > 1.0 else ""
             self.get_logger().info(
                 f"PyPF: vx={self._pf_speed:.2f} vy={self._pf_lat:.2f} "
                 f"yr={self._pf_yawrate:.2f} endD={end_dis:.1f} "
                 f"err={math.degrees(dir_diff):.0f}° "
                 f"pt={self._pf_point_id}/{path_size} "
                 f"wall=F{front_d:.1f}/L{left_d:.1f}/R{right_d:.1f}"
-                f"{adapt}"
             )
 
     def _log_diagnostics(self) -> None:

@@ -41,9 +41,9 @@ class TestFollowerConstants:
         return constants
 
     def test_yaw_gain_matches_cpp(self):
-        """YAW_GAIN should be 7.5 (C++ pathFollower line 53)."""
+        """YAW_GAIN_TRACK should be ~4.0 for tracking mode."""
         c = self._get_constants()
-        assert c.get("YAW_GAIN", 0) == pytest.approx(5.0, abs=1.0), (
+        assert c.get("YAW_GAIN_TRACK", 0) == pytest.approx(4.0, abs=1.0), (
             f"YAW_GAIN={c.get('YAW_GAIN')} — C++ uses 7.5"
         )
 
@@ -75,10 +75,10 @@ class TestFollowerConstants:
         c = self._get_constants()
         assert c.get("SLOW_DWN_DIS", 0) == pytest.approx(1.0, abs=0.1)
 
-    def test_yaw_gain_exists(self):
-        """YAW_GAIN should be ~5.0 (reduced for omni-walk stability)."""
+    def test_yaw_gain_turn_exists(self):
+        """YAW_GAIN_TURN should be ~6.0 for turn-in-place mode."""
         c = self._get_constants()
-        assert c.get("YAW_GAIN", 0) == pytest.approx(5.0, abs=1.0)
+        assert c.get("YAW_GAIN_TURN", 0) == pytest.approx(6.0, abs=1.0)
 
     def test_max_lat_speed(self):
         """MAX_LAT should be ~0.4 m/s for quadruped lateral stability."""
@@ -90,34 +90,38 @@ class TestFollowerConstants:
 # Part 2: Heading-gated acceleration (the KEY precision feature)
 # ===================================================================
 
-class TestOmniDirectional:
-    """Quadruped uses full omnidirectional cos/sin decomposition.
+class TestTwoModeController:
+    """Two-mode path follower: TRACK (cos/sin) + TURN (in-place).
 
-    No heading gate — cos/sin naturally maps any heading error to vx/vy:
-      0°: full forward  |  90°: pure strafe  |  180°: capped reverse
-    The obstacle safety zones prevent wall collisions.
+    TRACK mode: heading error < 60° → cos/sin omni-walk
+    TURN mode:  heading error > 60° → stop, turn in place
+    Hysteresis prevents oscillation at boundary.
     """
 
-    def test_cos_sin_decomposition_exists(self):
-        """Follower must use cos/sin decomposition for vx/vy."""
+    def test_cos_sin_decomposition_in_track_mode(self):
+        """Tracking mode must use cos/sin decomposition."""
         src = read_bridge_source()
         follow = src[src.find("def _follow_path"):]
-        assert "math.cos(dir_diff)" in follow, "No cos decomposition for vx"
-        assert "math.sin(dir_diff)" in follow, "No sin decomposition for vy"
+        assert "math.cos(dir_diff)" in follow, "No cos decomposition"
+        assert "math.sin(dir_diff)" in follow, "No sin decomposition"
 
-    def test_reverse_speed_capped(self):
-        """Reverse speed should be capped (can't see behind)."""
+    def test_turn_mode_exists(self):
+        """Must have a turn-in-place mode for large heading errors."""
         src = read_bridge_source()
         follow = src[src.find("def _follow_path"):]
-        assert "max(-0.3" in follow or "max(-0.2" in follow, (
-            "No reverse speed cap — robot could back into obstacles unseen"
-        )
+        assert "_pf_turning" in follow, "No turn-in-place mode"
 
-    def test_yaw_always_correcting(self):
-        """Yaw rate should always be proportional to heading error."""
+    def test_hysteresis(self):
+        """TRACK_THRE > TRACK_RESUME to prevent oscillation."""
         src = read_bridge_source()
         follow = src[src.find("def _follow_path"):]
-        assert "YAW_GAIN * dir_diff" in follow
+        assert "TRACK_THRE" in follow and "TRACK_RESUME" in follow
+
+    def test_space_aware_speed(self):
+        """Speed should be reduced in tight spaces."""
+        src = read_bridge_source()
+        follow = src[src.find("def _follow_path"):]
+        assert "space_speed" in follow or "min_gap" in follow
 
 
 # ===================================================================
@@ -171,8 +175,9 @@ class TestFollowerBehavior:
         ex: float, ey: float,  # endpoint
         speed: float = 0.0,    # current speed
     ) -> dict:
-        """Simulate one step of the omni-directional follower."""
+        """Simulate one step of the two-mode follower."""
         _MAX_SPEED = 0.8
+        _TRACK_THRE = 1.05
         _SLOW_DWN_DIS = 1.0
         _STOP_DIS = 0.2
         _MAX_LAT = 0.4
@@ -195,16 +200,20 @@ class TestFollowerBehavior:
             target_speed = 0.0
 
         vyaw = _YAW_GAIN * dir_diff
-        heading_ok = True  # no gate — omni-directional
+        turning = abs_err > _TRACK_THRE
+        heading_ok = not turning
 
-        if end_dis > _STOP_DIS:
+        if end_dis <= _STOP_DIS:
+            vx = 0.0
+            vy = 0.0
+        elif turning:
+            vx = 0.05
+            vy = 0.0
+        elif end_dis > _STOP_DIS:
             vx = target_speed * math.cos(dir_diff)
             vy = -target_speed * math.sin(dir_diff)
             vx = max(-0.3, vx)  # cap reverse
             vy = max(-_MAX_LAT, min(_MAX_LAT, vy))
-        else:
-            vx = 0.0
-            vy = 0.0
 
         return {"vx": vx, "vy": vy, "vyaw": vyaw, "heading_ok": heading_ok,
                 "dir_diff": dir_diff, "end_dis": end_dis}
@@ -215,11 +224,12 @@ class TestFollowerBehavior:
         assert r["vx"] > 0, "Should move forward when aligned"
         assert r["heading_ok"]
 
-    def test_90deg_strafes(self):
-        """When heading is 90° off, quadruped strafes (vx≈0, vy≠0)."""
-        r = self._simulate_step(0, 0, math.pi / 2, 5, 0, 5, 0)  # facing up, target right
-        assert abs(r["vx"]) < 0.1, "vx should be ~0 at 90° (cos(90°)=0)"
-        assert abs(r["vy"]) > 0.2, "Should strafe toward target at 90°"
+    def test_90deg_turns_in_place(self):
+        """When heading is 90° off (> 60° threshold), turn in place."""
+        r = self._simulate_step(0, 0, math.pi / 2, 5, 0, 5, 0)
+        assert not r["heading_ok"], "90° error should trigger turn mode"
+        assert r["vx"] == pytest.approx(0.05, abs=0.01), "Minimal creep in turn mode"
+        assert r["vy"] == 0.0, "No strafe in turn mode"
 
     def test_small_error_still_moves(self):
         """3° error is within threshold — should still move."""
@@ -256,20 +266,18 @@ class TestFollowerBehavior:
         r = self._simulate_step(0, 0, 0.0, 0.1, 0, 0.1, 0)
         assert r["vx"] == 0.0, "Should stop within 0.2m of goal"
 
-    def test_180deg_pure_reverse(self):
-        """180° error — pure reverse (target directly behind)."""
+    def test_180deg_turns_in_place(self):
+        """180° error — turn in place (not reverse)."""
         r = self._simulate_step(0, 0, math.pi, 5, 0, 5, 0)
-        assert r["vx"] < 0, "Should reverse when target is behind"
-        assert r["vx"] >= -0.3, "Reverse capped"
-        assert abs(r["vy"]) < 0.1, "Minimal strafe at 180°"
+        assert not r["heading_ok"], "180° should trigger turn mode"
+        assert r["vx"] == pytest.approx(0.05, abs=0.01)
 
-    def test_120deg_reverse_and_strafe(self):
-        """120° error — reverses + strafes (target behind-side)."""
-        r = self._simulate_step(0, 0, 2.1, 5, 0, 5, 0)  # 120° off
-        # cos(120°) = -0.5 → reverse, capped at -0.3
-        assert r["vx"] < 0, "Should reverse at 120° error"
-        assert r["vx"] >= -0.3, "Reverse should be capped"
-        assert abs(r["vy"]) > 0.1, "Should strafe toward target"
+    def test_120deg_turns_in_place(self):
+        """120° error — turn in place (not strafe/reverse)."""
+        r = self._simulate_step(0, 0, 2.1, 5, 0, 5, 0)
+        assert not r["heading_ok"], "120° should trigger turn mode"
+        assert r["vx"] == pytest.approx(0.05, abs=0.01), "Minimal creep"
+        assert r["vy"] == 0.0, "No strafe in turn mode"
 
     def test_yaw_rate_proportional(self):
         """Yaw rate should be proportional to heading error."""

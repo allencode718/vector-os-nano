@@ -23,5 +23,5 @@ doors:
   kitchen-hallway:        [13.5, 3.0]
   study-hallway:          [13.5, 8.0]
   master_bedroom-hallway: [3.0,  10.5]
-  guest_bedroom-hallway:  [12.0, 10.5]
+  guest_bedroom-hallway:  [16.0, 10.0]
   bathroom-hallway:       [8.5,  10.5]

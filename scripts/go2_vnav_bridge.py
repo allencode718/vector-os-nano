@@ -812,7 +812,7 @@ class Go2VNavBridge(Node):
         # Mode 2 (TURN):  heading error > 60° → stop, turn in place, then go
         # Hysteresis: TRACK→TURN at 60°, TURN→TRACK at 30° (prevents oscillation)
         _MAX_SPEED = 0.8               # m/s forward cruise (open space)
-        _MAX_LAT = 0.25                # m/s max lateral speed
+        _MAX_LAT = 0.15                # m/s max lateral speed (conservative — falls at 0.25)
         _MAX_YAW_RATE = 1.2            # rad/s max yaw rate
         _YAW_GAIN_TRACK = 4.0          # P-gain for yaw in tracking mode (gentle)
         _YAW_GAIN_TURN = 6.0           # P-gain for yaw in turn mode (snappy)
@@ -941,29 +941,25 @@ class Go2VNavBridge(Node):
             if left_gap < _DANGER and right_gap < _DANGER:
                 vx *= 0.3  # crawl when squeezed on BOTH sides
 
-        # Sides: push HARD away from wall when gap < comfort zone
+        # Sides: proportional push away from wall (never slam to max)
+        # Scale push by (1 - forward_speed_ratio) so fast-moving robot
+        # gets gentler lateral push (prevents tipping at speed).
+        _speed_ratio = min(1.0, abs(self._pf_speed) / _MAX_SPEED)
+        _push_scale = 0.3 * (1.0 - 0.5 * _speed_ratio)  # 0.3 at stop, 0.15 at max speed
+
         if left_gap < _COMFORT:
-            if left_gap <= _DANGER:
-                # Imminent contact — maximum push right
-                vy = -_MAX_LAT
-            else:
-                # Proportional push right
-                push_strength = (_COMFORT - left_gap) / (_COMFORT - _DANGER)
-                vy = max(-_MAX_LAT, vy - push_strength * 0.4)
-            # Block any leftward motion
+            push_strength = (_COMFORT - max(0, left_gap)) / _COMFORT
+            vy = max(-_MAX_LAT, vy - push_strength * _push_scale)
             if vy > 0:
                 vy = 0.0
         if right_gap < _COMFORT:
-            if right_gap <= _DANGER:
-                vy = _MAX_LAT
-            else:
-                push_strength = (_COMFORT - right_gap) / (_COMFORT - _DANGER)
-                vy = min(_MAX_LAT, vy + push_strength * 0.4)
+            push_strength = (_COMFORT - max(0, right_gap)) / _COMFORT
+            vy = min(_MAX_LAT, vy + push_strength * _push_scale)
             if vy < 0:
                 vy = 0.0
 
         # --- Smooth acceleration (prevents MPC gait destabilization) ---
-        _ACCEL_LAT = 0.02    # m/s per tick lateral
+        _ACCEL_LAT = 0.01    # m/s per tick lateral (0→0.15 takes 0.75s)
         _ACCEL_YAW_TRACK = 0.04   # rad/s per tick in tracking (gentle)
         _ACCEL_YAW_TURN = 0.08    # rad/s per tick in turn mode (faster)
 

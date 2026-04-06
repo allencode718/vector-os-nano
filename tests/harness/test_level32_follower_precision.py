@@ -83,7 +83,7 @@ class TestFollowerConstants:
     def test_max_lat_speed(self):
         """MAX_LAT should be ~0.4 m/s for quadruped lateral stability."""
         c = self._get_constants()
-        assert c.get("MAX_LAT", 0) == pytest.approx(0.25, abs=0.05)
+        assert c.get("MAX_LAT", 0) == pytest.approx(0.15, abs=0.05)
 
 
 # ===================================================================

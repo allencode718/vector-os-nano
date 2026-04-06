@@ -785,15 +785,23 @@ class Go2VNavBridge(Node):
         # Head jammed against wall prevents lateral movement, so must back up first.
         now = time.time()
         if now < self._wall_escape_until:
+            # Wall escape — use GENTLE velocities (robot may be off-balance)
             if now < self._wall_escape_phase2:
-                # Phase 1: pure reverse — clear the wall
-                self._go2.set_velocity(-0.4, 0.0, 0.0)
+                tgt_vx, tgt_vy, tgt_yaw = -0.2, 0.0, 0.0
             else:
-                # Phase 2: strafe + turn toward open side
                 front_d, left_d, right_d = self._scan_surroundings()
-                escape_vy = 0.35 if right_d > left_d else -0.35
-                escape_vyaw = 0.5 if right_d > left_d else -0.5
-                self._go2.set_velocity(-0.15, escape_vy, escape_vyaw)
+                tgt_vy = 0.10 if right_d > left_d else -0.10
+                tgt_yaw = 0.3 if right_d > left_d else -0.3
+                tgt_vx, tgt_vy, tgt_yaw = -0.1, tgt_vy, tgt_yaw
+            # Smooth toward targets (reuse the same ramp logic)
+            _A = 0.03
+            if self._pf_speed < tgt_vx: self._pf_speed = min(tgt_vx, self._pf_speed + _A)
+            else: self._pf_speed = max(tgt_vx, self._pf_speed - _A)
+            if self._pf_lat < tgt_vy: self._pf_lat = min(tgt_vy, self._pf_lat + 0.01)
+            else: self._pf_lat = max(tgt_vy, self._pf_lat - 0.01)
+            if self._pf_yawrate < tgt_yaw: self._pf_yawrate = min(tgt_yaw, self._pf_yawrate + 0.04)
+            else: self._pf_yawrate = max(tgt_yaw, self._pf_yawrate - 0.04)
+            self._go2.set_velocity(self._pf_speed, self._pf_lat, self._pf_yawrate)
             self._last_cmd_time = now
             return
 
@@ -804,18 +812,18 @@ class Go2VNavBridge(Node):
         else:
             self._wall_contact_time = 0.0
 
-        if self._wall_contact_time > 0.5:  # 0.5s — trigger before dog jams
+        if self._wall_contact_time > 0.5:
             front_d, left_d, right_d = self._scan_surroundings()
             open_side = "right" if right_d > left_d else "left"
             self.get_logger().warn(
                 f"Wall escape: reverse 1s then strafe {open_side}, front_d={front_d_check:.2f}"
             )
-            self._wall_escape_phase2 = now + 1.0   # phase 1 = 1s pure reverse
-            self._wall_escape_until = now + 2.5     # total = 2.5s (1s reverse + 1.5s strafe)
+            self._wall_escape_phase2 = now + 1.0
+            self._wall_escape_until = now + 2.5
             self._wall_contact_time = 0.0
             self._current_path = []
             self._stuck_count = 0
-            return
+            # Don't return — fall through to smoother below
 
         if not hasattr(self, '_pf_speed'):
             self._pf_speed = 0.0       # current forward speed
@@ -846,16 +854,24 @@ class Go2VNavBridge(Node):
 
         if not has_path:
             if not self._nav_enabled:
-                self._go2.set_velocity(0.0, 0.0, 0.0)
-                self._last_cmd_time = time.time()
-                return
-            # Idle wander: no path but nav enabled (waiting for TARE/FAR replan)
-            front_dist = self._check_front_obstacle()
-            if front_dist < 0.4:
-                # Front blocked — back away + turn to find open space
-                self._go2.set_velocity(-0.2, 0.0, 0.4)
+                # Decel to stop (smoothed)
+                self._pf_speed *= 0.9
+                self._pf_lat *= 0.9
+                self._pf_yawrate *= 0.9
+                if abs(self._pf_speed) < 0.01: self._pf_speed = 0.0
+                if abs(self._pf_lat) < 0.01: self._pf_lat = 0.0
+                if abs(self._pf_yawrate) < 0.01: self._pf_yawrate = 0.0
             else:
-                self._go2.set_velocity(0.15, 0.0, 0.10)
+                front_dist = self._check_front_obstacle()
+                tgt_vx = -0.15 if front_dist < 0.4 else 0.15
+                tgt_yaw = 0.3 if front_dist < 0.4 else 0.1
+                _A = 0.03
+                if self._pf_speed < tgt_vx: self._pf_speed = min(tgt_vx, self._pf_speed + _A)
+                else: self._pf_speed = max(tgt_vx, self._pf_speed - _A)
+                if self._pf_yawrate < tgt_yaw: self._pf_yawrate = min(tgt_yaw, self._pf_yawrate + 0.03)
+                else: self._pf_yawrate = max(tgt_yaw, self._pf_yawrate - 0.03)
+                self._pf_lat *= 0.9  # decay lateral
+            self._go2.set_velocity(self._pf_speed, self._pf_lat, self._pf_yawrate)
             self._last_cmd_time = time.time()
             self._pf_point_id = 0
             return
